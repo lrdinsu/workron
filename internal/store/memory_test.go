@@ -3,7 +3,7 @@ package store
 import "testing"
 
 func TestMemoryStore_AddAndClaimJob(t *testing.T) {
-	store := newMemoryStore()
+	store := NewMemoryStore()
 
 	// Test adding a Job
 	id := store.AddJob("echo test")

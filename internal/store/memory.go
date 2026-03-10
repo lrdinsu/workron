@@ -6,37 +6,6 @@ import (
 	"time"
 )
 
-// JobStore defines the behavior any storage backend must have
-type JobStore interface {
-	AddJob(command string) string
-	ClaimJob(id string) (*Job, bool)
-	GetJob(id string) (*Job, bool)
-	UpdateJobStatus(id string, status JobStatus)
-}
-
-// JobStatus defines the valid states for a job
-type JobStatus string
-
-const (
-	StatusPending JobStatus = "pending"
-	StatusRunning JobStatus = "running"
-	StatusDone    JobStatus = "done"
-	StatusFailed  JobStatus = "failed"
-)
-
-// Job represents a single command to be executed
-type Job struct {
-	ID         string
-	Command    string
-	Status     JobStatus
-	CreatedAt  time.Time
-	StartedAt  *time.Time
-	DoneAt     *time.Time
-	Retries    int
-	MaxRetries int
-	Attempts   int
-}
-
 // MemoryStore holds jobs in memory safely
 type MemoryStore struct {
 	mu   sync.RWMutex
@@ -44,7 +13,7 @@ type MemoryStore struct {
 }
 
 // NewMemoryStore initializes the store
-func newMemoryStore() *MemoryStore {
+func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		jobs: make(map[string]*Job),
 	}
@@ -78,7 +47,8 @@ func (s *MemoryStore) ClaimJob() (*Job, bool) {
 	for _, job := range s.jobs {
 		if job.Status == StatusPending {
 			job.Status = StatusRunning
-			job.StartedAt = new(time.Now())
+			t := time.Now()
+			job.StartedAt = &t
 			job.Attempts++
 			return job, true
 		}
@@ -103,6 +73,33 @@ func (s *MemoryStore) UpdateJobStatus(id string, status JobStatus) {
 
 	if job, exists := s.jobs[id]; exists {
 		job.Status = status
-		job.DoneAt = new(time.Now())
+		if status == StatusDone || status == StatusFailed {
+			t := time.Now()
+			job.DoneAt = &t
+		}
+	}
+}
+
+// ListJobs returns all jobs currently in the store in no particular order
+func (s *MemoryStore) ListJobs() []*Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	list := make([]*Job, 0, len(s.jobs))
+	for _, job := range s.jobs {
+		list = append(list, job)
+	}
+	return list
+}
+
+// UpdateHeartbeat records the current time as the last known sign of life
+// for a running job. Used by the timeout checker to detect dead workers.
+func (s *MemoryStore) UpdateHeartbeat(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if job, exists := s.jobs[id]; exists {
+		t := time.Now()
+		job.LastHeartbeat = &t
 	}
 }
