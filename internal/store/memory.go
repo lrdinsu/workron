@@ -50,7 +50,8 @@ func (s *MemoryStore) ClaimJob() (*Job, bool) {
 			t := time.Now()
 			job.StartedAt = &t
 			job.Attempts++
-			return job, true
+			copy := *job
+			return &copy, true
 		}
 	}
 
@@ -63,7 +64,12 @@ func (s *MemoryStore) GetJob(id string) (*Job, bool) {
 	defer s.mu.RUnlock()
 
 	job, exists := s.jobs[id]
-	return job, exists
+	if !exists {
+		return nil, false
+	}
+
+	copy := *job
+	return &copy, true
 }
 
 // UpdateJobStatus safely updates a job's completion state
