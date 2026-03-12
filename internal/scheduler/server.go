@@ -77,7 +77,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListJobs handles GET /jobs
-func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleListJobs(w http.ResponseWriter, _ *http.Request) {
 	jobs := s.store.ListJobs()
 	writeJSON(w, http.StatusOK, jobs)
 }
