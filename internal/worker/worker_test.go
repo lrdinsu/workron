@@ -9,7 +9,7 @@ import (
 )
 
 // waitForStatus polls the store until the job reaches the expected status or the timeout is exceeded.
-// This is needed because the worker runs in a separate goroutine and we need to wait for it to finish.
+// This is needed because the worker runs in a separate goroutine, and we need to wait for it to finish.
 func waitForStatus(t *testing.T, s *store.MemoryStore, id string, expected store.JobStatus, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -21,7 +21,11 @@ func waitForStatus(t *testing.T, s *store.MemoryStore, id string, expected store
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	job, _ := s.GetJob(id)
+	job, found := s.GetJob(id)
+	if !found {
+		t.Errorf("job %s: not found in store after %v", id, timeout)
+		return
+	}
 	t.Errorf("job %s: expected status %q, got %q after %v", id, expected, job.Status, timeout)
 }
 
