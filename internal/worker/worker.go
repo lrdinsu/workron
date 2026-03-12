@@ -50,13 +50,21 @@ func (w *Worker) Start(ctx context.Context) {
 	}
 }
 
-// process executes a single job and updates its status in the store
+// process executes a single job and updates its status in the store.
+// If the job fails and has remaining retries, it is re-queued as pending.
+// If retries are exhausted, it is marked as failed permanently.
 func (w *Worker) process(job *store.Job) {
-	log.Printf("[worker-%d] processing job %s: %q", w.id, job.ID, job.Command)
+	log.Printf("[worker-%d] picking up job %s (attempt %d/%d: %q", w.id, job.ID, job.Attempts, job.MaxRetries, job.Command)
 
 	err := w.executor.Execute(job.Command)
 	if err != nil {
-		log.Printf("[worker-%d] job %s failed: %v", w.id, job.ID, err)
+		if job.Attempts < job.MaxRetries {
+			log.Printf("[worker-%d] job %s failed, retrying (attempt %d/%d): %v", w.id, job.ID, job.Attempts, job.MaxRetries, err)
+			w.store.UpdateJobStatus(job.ID, store.StatusPending)
+			return
+		}
+
+		log.Printf("[worker-%d] job %s failed permanently after %d attempts: %v", w.id, job.ID, job.Attempts, err)
 		w.store.UpdateJobStatus(job.ID, store.StatusFailed)
 		return
 	}

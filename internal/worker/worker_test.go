@@ -52,7 +52,56 @@ func TestWorker_MarksFailedJob(t *testing.T) {
 	w := NewWorker(1, s)
 	go w.Start(ctx)
 
-	waitForStatus(t, s, id, store.StatusFailed, 3*time.Second)
+	// Job should eventually be permanently failed after all retries exhausted
+	waitForStatus(t, s, id, store.StatusFailed, 5*time.Second)
+}
+
+func TestWorker_RetriesFailedJobBeforeGivingUp(t *testing.T) {
+	s := store.NewMemoryStore()
+	id := s.AddJob("thiscommanddoesnotexist")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	w := NewWorker(1, s)
+	go w.Start(ctx)
+
+	waitForStatus(t, s, id, store.StatusFailed, 5*time.Second)
+
+	// Verify it was attempted exactly MaxRetries times, not just once
+	job, found := s.GetJob(id)
+	if !found {
+		t.Fatal("job not found after completion")
+	}
+	if job.Attempts != job.MaxRetries {
+		t.Errorf("expected %d attempts, got %d", job.MaxRetries, job.Attempts)
+	}
+
+}
+
+func TestWorker_DoesNotRetryJobThatSucceeds(t *testing.T) {
+	s := store.NewMemoryStore()
+	// This command should succeed on the first attempt, so the worker
+	// should not requeue or retry it.
+	id := s.AddJob("echo hello")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	w := NewWorker(1, s)
+	go w.Start(ctx)
+
+	waitForStatus(t, s, id, store.StatusDone, 3*time.Second)
+
+	// A successful job should only have been attempted once
+	job, found := s.GetJob(id)
+	if !found {
+		t.Fatal("job not found after completion")
+	}
+	if job.Attempts != 1 {
+		t.Errorf("expected 1 attempt for successful job, go %d", job.Attempts)
+	}
+
 }
 
 func TestWorker_StopsOnContextCancel(t *testing.T) {
