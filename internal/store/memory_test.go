@@ -32,3 +32,26 @@ func TestMemoryStore_AddAndClaimJob(t *testing.T) {
 		t.Errorf("Expected no pending jobs to claim, but found one")
 	}
 }
+
+func TestMemoryStore_ListRunningJobs(t *testing.T) {
+	s := NewMemoryStore()
+	// All pending
+	s.AddJob("echo one")
+	s.AddJob("echo two")
+	s.AddJob("echo three")
+
+	// One and two become running
+	s.ClaimJob()
+	s.ClaimJob()
+
+	running := s.ListRunningJobs()
+	if len(running) != 2 {
+		t.Errorf("expected 2 running jobs, got %d", len(running))
+	}
+
+	for _, j := range running {
+		if j.Status != StatusRunning {
+			t.Errorf("expected status running, got %s", j.Status)
+		}
+	}
+}

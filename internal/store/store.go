@@ -8,6 +8,7 @@ type JobStore interface {
 	ClaimJob() (*Job, bool)
 	GetJob(id string) (*Job, bool)
 	ListJobs() []*Job
+	ListRunningJobs() []*Job
 	UpdateJobStatus(id string, status JobStatus)
 	UpdateHeartbeat(id string)
 }
