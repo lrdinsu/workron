@@ -301,7 +301,7 @@ func TestHandleJobFail_PermanentFailure(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		s.ClaimJob()
 		if i < 2 {
-			// Re-queue for next claim
+			// Re-queue for the next claim
 			s.UpdateJobStatus(id, store.StatusPending)
 		}
 	}
