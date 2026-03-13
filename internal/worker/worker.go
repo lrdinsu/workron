@@ -57,7 +57,7 @@ func (w *Worker) Start(ctx context.Context) {
 			continue
 		}
 
-		// No pending jobs, wait before polling again
+		// No pending jobs, wait for the next tick or context cancellation
 		select {
 		case <-ctx.Done():
 			log.Printf("[worker-%d] shutting down", w.id)
