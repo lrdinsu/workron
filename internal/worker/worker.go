@@ -38,22 +38,33 @@ func NewWorker(id int, source JobSource) *Worker {
 func (w *Worker) Start(ctx context.Context) {
 	log.Printf("[worker-%d] started", w.id)
 
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
 	for {
+		// Check for shutdown before doing any work
 		select {
 		case <-ctx.Done():
 			// Context was canceled, scheduler is shutting down
 			log.Printf("[worker-%d] shutting down", w.id)
 			return
 		default:
-			job, found := w.source.ClaimJob()
-			if !found {
-				// No pending jobs, wait before polling again
-				time.Sleep(pollInterval)
-				continue
-			}
-
-			w.process(job)
 		}
+
+		job, found := w.source.ClaimJob()
+		if found {
+			w.process(job)
+			continue
+		}
+
+		// No pending jobs, wait before polling again
+		select {
+		case <-ctx.Done():
+			log.Printf("[worker-%d] shutting down", w.id)
+			return
+		case <-ticker.C:
+		}
+
 	}
 }
 
