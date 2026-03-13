@@ -154,3 +154,172 @@ func TestHandleListJobs_WithJobs(t *testing.T) {
 		t.Errorf("expected 2 jobs, got %d", len(jobs))
 	}
 }
+
+func TestHandleClaimJob_ReturnsJob(t *testing.T) {
+	s := store.NewMemoryStore()
+	id := s.AddJob("echo hello")
+	srv := NewServer(s)
+
+	r := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
+	}
+
+	var job store.Job
+	if err := json.NewDecoder(w.Body).Decode(&job); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if job.ID != id {
+		t.Errorf("expected job ID %s, got %s", id, job.ID)
+	}
+
+	if job.Status != store.StatusRunning {
+		t.Errorf("expected status running, got %s", job.Status)
+	}
+}
+
+func TestHandleClaimJob_NoJobs(t *testing.T) {
+	srv := newTestServer()
+
+	r := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected status 204, got %d", w.Code)
+	}
+}
+
+func TestHandleClaimJob_SkipsRunningJobs(t *testing.T) {
+	s := store.NewMemoryStore()
+	s.AddJob("echo first")
+	srv := NewServer(s)
+
+	// Claim the only job
+	r1 := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
+	w1 := httptest.NewRecorder()
+	srv.ServeHTTP(w1, r1)
+
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first claim expected 200, got %d", w1.Code)
+	}
+
+	// Second claim should find nothing
+	r2 := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, r2)
+
+	if w2.Code != http.StatusNoContent {
+		t.Errorf("second claim expected 204, got %d", w2.Code)
+	}
+}
+
+func TestHandleJobDone_Success(t *testing.T) {
+	s := store.NewMemoryStore()
+	id := s.AddJob("echo hello")
+
+	// Claim the job first so it's in running state
+	s.ClaimJob()
+
+	srv := NewServer(s)
+	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/done", nil)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
+	}
+
+	job, _ := s.GetJob(id)
+	if job.Status != store.StatusDone {
+		t.Errorf("expected status done, got %s", job.Status)
+	}
+}
+
+func TestHandleJobDone_NotFound(t *testing.T) {
+	srv := newTestServer()
+	r := httptest.NewRequest(http.MethodPost, "/jobs/doesnotexist/done", nil)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected status 404, got %d", w.Code)
+	}
+}
+
+func TestHandleJobDone_NotRunning(t *testing.T) {
+	s := store.NewMemoryStore()
+	id := s.AddJob("echo hello") // status is pending, not running
+	srv := NewServer(s)
+
+	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/done", nil)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected status 409, got %d", w.Code)
+	}
+}
+
+func TestHandleJobFail_RetriesJob(t *testing.T) {
+	s := store.NewMemoryStore()
+	id := s.AddJob("bad command")
+
+	// Claim it (attempt 1 of 3)
+	s.ClaimJob()
+
+	srv := NewServer(s)
+	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/fail", nil)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
+	}
+
+	// Job should be re-queued as pending since attempts(1) < maxRetries(3)
+	job, _ := s.GetJob(id)
+	if job.Status != store.StatusPending {
+		t.Errorf("expected status pending (retry), got %s", job.Status)
+	}
+}
+
+func TestHandleJobFail_PermanentFailure(t *testing.T) {
+	s := store.NewMemoryStore()
+	id := s.AddJob("bad command")
+
+	// Exhaust all retries by claiming 3 times
+	for i := 0; i < 3; i++ {
+		s.ClaimJob()
+		if i < 2 {
+			// Re-queue for next claim
+			s.UpdateJobStatus(id, store.StatusPending)
+		}
+	}
+
+	// Now attempts == 3 == maxRetries, job is running
+	srv := NewServer(s)
+	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/fail", nil)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
+	}
+
+	// Job should be permanently failed since attempts(3) >= maxRetries(3)
+	job, _ := s.GetJob(id)
+	if job.Status != store.StatusFailed {
+		t.Errorf("expected status failed, got %s", job.Status)
+	}
+}
