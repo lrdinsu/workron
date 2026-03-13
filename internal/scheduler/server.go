@@ -29,11 +29,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// regsterRoutes wires up all HTTP endpoints
+// registerRoutes wires up all HTTP endpoints
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /jobs", s.handleSubmitJob)
+	s.mux.HandleFunc("GET /jobs/next", s.handleClaimJob)
 	s.mux.HandleFunc("GET /jobs/{id}", s.handleGetJob)
 	s.mux.HandleFunc("GET /jobs", s.handleListJobs)
+	s.mux.HandleFunc("POST /jobs/{id}/done", s.handleJobDone)
+	s.mux.HandleFunc("POST /jobs/{id}/fail", s.handleJobFail)
 }
 
 // submitJobRequest is the expected JSON body for POST /jobs
@@ -80,6 +83,69 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListJobs(w http.ResponseWriter, _ *http.Request) {
 	jobs := s.store.ListJobs()
 	writeJSON(w, http.StatusOK, jobs)
+}
+
+// handleClaimJob handles GET /jobs/next
+// Atomically claims one pending job and returns it to the calling worker.
+// Returns 204 No Content if no jobs are available
+func (s *Server) handleClaimJob(w http.ResponseWriter, _ *http.Request) {
+	job, found := s.store.ClaimJob()
+	if !found {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	log.Printf("[server] job %s claimed by remote worker", job.ID)
+	writeJSON(w, http.StatusOK, job)
+}
+
+// handleJobDone handles POST /jobs/{id}/done
+// Worker reports that a job completed successfully.
+func (s *Server) handleJobDone(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	job, found := s.store.GetJob(id)
+	if !found {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	if job.Status != store.StatusRunning {
+		http.Error(w, "job is not running", http.StatusConflict)
+		return
+	}
+
+	s.store.UpdateJobStatus(id, store.StatusDone)
+	log.Printf("[server] job %s marked done", id)
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleJobFail handles POST /jobs/{id}/fail
+// Worker reports that a job failed. The scheduler decides whether to retry.
+func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	job, found := s.store.GetJob(id)
+	if !found {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	if job.Status != store.StatusRunning {
+		http.Error(w, "job is not running", http.StatusConflict)
+		return
+	}
+
+	// Retry logic: if attempts haven't been exhausted, re-queue as pending
+	if job.Attempts < job.MaxRetries {
+		log.Printf("[server] job %s failed (attempt %d/%d), re-queuing", id, job.Attempts, job.MaxRetries)
+		s.store.UpdateJobStatus(id, store.StatusPending)
+	} else {
+		log.Printf("[server] job %s failed permanently after %d attempts", id, job.Attempts)
+		s.store.UpdateJobStatus(id, store.StatusFailed)
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
 // writeJSON is a helper that encodes v as JSON and writes it to w
