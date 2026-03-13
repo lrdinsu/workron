@@ -9,6 +9,10 @@ build:
 run:
 	go run ./cmd/scheduler --port=8080 --workers=3
 
+# Run a standalone worker process pointing at the local scheduler
+run-worker:
+	go run ./cmd/worker --scheduler=http://localhost:8080 --workers=3
+
 # Run all tests
 test:
 	go test ./...
