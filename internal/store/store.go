@@ -24,13 +24,13 @@ const (
 
 // Job represents a single command to be executed
 type Job struct {
-	ID            string
-	Command       string
-	Status        JobStatus
-	CreatedAt     time.Time
-	StartedAt     *time.Time
-	DoneAt        *time.Time
-	LastHeartbeat *time.Time
-	MaxRetries    int
-	Attempts      int
+	ID            string     `json:"id"`
+	Command       string     `json:"command"`
+	Status        JobStatus  `json:"status"`
+	CreatedAt     time.Time  `json:"created_at"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	DoneAt        *time.Time `json:"done_at,omitempty"`
+	LastHeartbeat *time.Time `json:"last_heart_beat,omitempty"`
+	MaxRetries    int        `json:"max_retries"`
+	Attempts      int        `json:"attempts"`
 }
