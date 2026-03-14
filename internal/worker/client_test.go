@@ -124,3 +124,21 @@ func TestSchedulerClient_UpdateJobStatus(t *testing.T) {
 		t.Errorf("expected status done, got %s", job.Status)
 	}
 }
+
+func TestSchedulerClient_SendHeartbeat(t *testing.T) {
+	client, s, cleanup := newTestScheduler(t)
+	defer cleanup()
+
+	id := s.AddJob("echo hello")
+	s.ClaimJob() // move to running
+
+	err := client.SendHeartbeat(id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	job, _ := s.GetJob(id)
+	if job.LastHeartbeat == nil {
+		t.Error("expected last_heartbeat to be set after heartbeat")
+	}
+}

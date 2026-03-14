@@ -112,8 +112,8 @@ func (s *MemoryStore) ListRunningJobs() []*Job {
 	return jobs
 }
 
-// UpdateHeartbeat records the current time as the last known sign of life
-// for a running job. Used by the timeout checker to detect dead workers.
+// UpdateHeartbeat records the current time as the last known sign of life for a running job.
+// Used by the timeout checker to detect dead workers.
 func (s *MemoryStore) UpdateHeartbeat(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

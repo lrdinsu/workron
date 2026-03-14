@@ -37,6 +37,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /jobs", s.handleListJobs)
 	s.mux.HandleFunc("POST /jobs/{id}/done", s.handleJobDone)
 	s.mux.HandleFunc("POST /jobs/{id}/fail", s.handleJobFail)
+	s.mux.HandleFunc("POST /jobs/{id}/heartbeat", s.handleHeartbeat)
 }
 
 // submitJobRequest is the expected JSON body for POST /jobs
@@ -145,6 +146,26 @@ func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 		s.store.UpdateJobStatus(id, store.StatusFailed)
 	}
 
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleHeartbeat handles POST /jobs/{id}/heartbeat
+// Worker signals it is still alive and working on this job.
+func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	job, found := s.store.GetJob(id)
+	if !found {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	if job.Status != store.StatusRunning {
+		http.Error(w, "job is not running", http.StatusConflict)
+		return
+	}
+
+	s.store.UpdateHeartbeat(id)
 	w.WriteHeader(http.StatusOK)
 }
 

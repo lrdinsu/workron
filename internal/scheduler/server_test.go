@@ -323,3 +323,51 @@ func TestHandleJobFail_PermanentFailure(t *testing.T) {
 		t.Errorf("expected status failed, got %s", job.Status)
 	}
 }
+
+func TestHandleHeartbeat_Success(t *testing.T) {
+	s := store.NewMemoryStore()
+	id := s.AddJob("echo hello")
+	s.ClaimJob() // move to running
+
+	srv := NewServer(s)
+	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/heartbeat", nil)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
+	}
+
+	job, _ := s.GetJob(id)
+	if job.LastHeartbeat == nil {
+		t.Error("expected last_heartbeat to be set")
+	}
+}
+
+func TestHandleHeartbeat_NotFound(t *testing.T) {
+	srv := newTestServer()
+	r := httptest.NewRequest(http.MethodPost, "/jobs/doesnotexist/heartbeat", nil)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected status 404, got %d", w.Code)
+	}
+}
+
+func TestHandleHeartbeat_NotRunning(t *testing.T) {
+	s := store.NewMemoryStore()
+	id := s.AddJob("echo hello") // status is pending, not running
+	srv := NewServer(s)
+
+	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/heartbeat", nil)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected status 409, got %d", w.Code)
+	}
+}

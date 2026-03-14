@@ -114,3 +114,23 @@ func (c *SchedulerClient) UpdateJobStatus(id string, status store.JobStatus) {
 		fmt.Printf("[client] warning: %v\n", err)
 	}
 }
+
+// SendHeartbeat tells the scheduler the worker is still alive and working on this job.
+func (c *SchedulerClient) SendHeartbeat(id string) error {
+	resp, err := c.httpClient.Post(c.baseURL+"/jobs/"+id+"/heartbeat", "", nil)
+	if err != nil {
+		return fmt.Errorf("heartbeat for job %s: %w", id, err)
+	}
+
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("[client] failed to close response body: %v", closeErr)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("heartbeat for job %s: unexpected status %d", id, resp.StatusCode)
+	}
+
+	return nil
+}
