@@ -6,27 +6,25 @@ A lightweight distributed job scheduler written in Go.
 
 ## Overview
 
-Workron is a distributed job scheduler that allows you to submit jobs via a REST API and execute them across multiple concurrent workers. It is designed with simplicity and fault tolerance in mind, and built incrementally — starting from a single-process in-memory scheduler and evolving toward a fully distributed, fault-tolerant system.
+Workron is a distributed job scheduler that accepts jobs via a REST API and executes them across concurrent workers. It supports two deployment modes: a single-process standalone mode where the scheduler and workers share memory, and a distributed mode where the scheduler and workers run as separate binaries communicating over HTTP.
 
 If you are curious about the architectural decisions and trade-offs behind this project, I wrote about it here:
-📝 [Lynn's blog](https://lrdinsu.github.io/posts/designing-distributed-job-scheduler-go/)
+📝 [Lynn's blog](https://lrdinsu.github.io)
 
 ---
 
 ## Features
 
-**Currently available**
-- Submit jobs via REST API
+- Submit and monitor jobs via REST API
 - In-memory job queue with status tracking (`pending` → `running` → `done` / `failed`)
 - Multiple concurrent workers with mutex-protected atomic job claiming
-- Job retry on failure, re-queued up to `MaxRetries` times before marked failed
-- List and query job status via API
-- Graceful shutdown, workers finish current job before exiting
+- Automatic retry on failure, re-queued up to `MaxRetries` times before marked permanently failed
+- Two deployment modes: standalone (single process) or distributed (separate scheduler + worker binaries over HTTP)
+- Graceful shutdown — workers finish their current job before exiting
 
 **Planned**
-- [ ] Separate scheduler and worker processes communicating over HTTP
 - [ ] Heartbeat-based worker failure detection and job re-queuing
-- [ ] Job persistence with SQLite / PostgreSQL
+- [ ] Job persistence with SQLite
 - [ ] Cron-style scheduling
 - [ ] Job priority queue
 - [ ] Web dashboard
@@ -34,6 +32,10 @@ If you are curious about the architectural decisions and trade-offs behind this 
 ---
 
 ## Architecture
+
+### Standalone Mode
+
+Everything runs in a single process. Workers access the job store directly through shared memory, protected by a mutex.
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -47,9 +49,22 @@ If you are curious about the architectural decisions and trade-offs behind this 
 └──────────────────────────────────────────────┘
 ```
 
-Everything currently runs in a single process. The scheduler exposes a REST API to accept jobs, stores them in a mutex-protected in-memory map, and dispatches them to a configurable pool of worker goroutines. The mutex ensures that two workers can never claim the same job simultaneously.
+### Distributed Mode
 
-In a later phase the architecture will split into separate scheduler and worker binaries communicating over HTTP, allowing workers to run on different machines.
+The scheduler and workers run as separate binaries. Workers poll the scheduler over HTTP to claim jobs and report results. Workers can run on different machines.
+
+```
+┌─────────────────────┐         ┌──────────────────────┐
+│      Scheduler      │         │       Workers        │
+│                     │  HTTP   │                      │
+│  REST API           │◄───────►│  Worker Process A    │
+│  Job Store          │         │  Worker Process B    │
+│                     │         │  Worker Process C    │
+└─────────────────────┘         └──────────────────────┘
+    Source of truth                   Any machine
+```
+
+Both modes use the same `JobSource` interface, so the worker code is identical regardless of whether it talks to a local store or a remote scheduler.
 
 ---
 
@@ -67,18 +82,48 @@ cd workron
 go mod tidy
 ```
 
-### Run
+### Standalone Mode
+
+Run the scheduler and workers in a single process:
 
 ```bash
+make run-standalone
+# or
+go run ./cmd/scheduler --mode=standalone --port=8080 --workers=3
+```
+
+### Distributed Mode
+
+Start the scheduler and workers separately:
+
+```bash
+# Terminal 1: start the scheduler
 make run
 # or
-go run ./cmd/scheduler --workers=3 --port=8080
+go run ./cmd/scheduler --port=8080
+
+# Terminal 2: start remote workers
+make run-worker
+# or
+go run ./cmd/worker --scheduler=http://localhost:8080 --workers=3
 ```
+
+### CLI Flags
+
+**Scheduler** (`cmd/scheduler`)
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--workers` | `3` | Number of concurrent worker goroutines |
+| `--mode` | `scheduler` | `scheduler` (HTTP API only) or `standalone` (API + local workers) |
 | `--port` | `8080` | Port for the REST API |
+| `--workers` | `3` | Number of local workers (standalone mode only) |
+
+**Worker** (`cmd/worker`)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--scheduler` | `http://localhost:8080` | Scheduler base URL |
+| `--workers` | `3` | Number of concurrent worker goroutines |
 
 ---
 
@@ -92,11 +137,15 @@ curl -X POST http://localhost:8080/jobs \
   -d '{"command": "echo hello"}'
 ```
 
-Response:
+Response (`201 Created`):
 ```json
 {
-  "id": "job-1718000000000",
-  "status": "pending"
+  "id": "job-1",
+  "command": "echo hello",
+  "status": "pending",
+  "created_at": "2026-03-13T12:00:00Z",
+  "max_retries": 3,
+  "attempts": 0
 }
 ```
 
@@ -106,23 +155,33 @@ Response:
 curl http://localhost:8080/jobs/{id}
 ```
 
-Response:
-```json
-{
-  "id": "job-1718000000000",
-  "command": "echo hello",
-  "status": "done",
-  "created_at": "2024-06-10T12:00:00Z",
-  "started_at": "2024-06-10T12:00:01Z",
-  "done_at": "2024-06-10T12:00:01Z"
-}
-```
-
 ### List all jobs
 
 ```bash
 curl http://localhost:8080/jobs
 ```
+
+### Claim next job (used by workers)
+
+```bash
+curl http://localhost:8080/jobs/next
+```
+
+Returns `200` with the claimed job, or `204 No Content` if no jobs are available.
+
+### Report job done
+
+```bash
+curl -X POST http://localhost:8080/jobs/{id}/done
+```
+
+### Report job failed
+
+```bash
+curl -X POST http://localhost:8080/jobs/{id}/fail
+```
+
+The scheduler decides whether to retry (re-queue as `pending`) or mark as permanently `failed` based on the attempt count.
 
 ---
 
@@ -131,8 +190,10 @@ curl http://localhost:8080/jobs
 ```
 workron/
 ├── cmd/
-│   └── scheduler/
-│       └── main.go              # Entry point, wires everything together
+│   ├── scheduler/
+│   │   └── main.go              # Scheduler entry point (standalone or distributed)
+│   └── worker/
+│       └── main.go              # Standalone worker entry point
 ├── internal/
 │   ├── store/
 │   │   ├── store.go             # JobStore interface, Job struct, JobStatus
@@ -145,7 +206,9 @@ workron/
 │       ├── worker.go            # Poll and execute loop
 │       ├── worker_test.go
 │       ├── executor.go          # Runs shell commands via os/exec
-│       └── executor_test.go
+│       ├── executor_test.go
+│       ├── client.go            # HTTP client for talking to scheduler
+│       └── client_test.go
 ├── Makefile
 ├── .gitignore
 ├── go.mod
@@ -161,15 +224,14 @@ workron/
 | Language | Go 1.22+ |
 | HTTP | `net/http` (stdlib only) |
 | Job execution | `os/exec` (stdlib) |
-| Storage | In-memory (SQLite planned for Phase 5) |
-| Zero external dependencies | ✅ |
-
+| Storage | In-memory (SQLite planned) |
+| External dependencies | None |
 
 ---
 
 ## Contributing
 
-This is a personal learning project and not yet ready for production use. Feedback and suggestions are welcome, feel free to open an issue.
+This is a personal learning project and not yet ready for production use. Feedback and suggestions are welcome — feel free to open an issue.
 
 ---
 
