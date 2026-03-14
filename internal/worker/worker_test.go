@@ -120,7 +120,7 @@ func TestWorker_StopsOnContextCancel(t *testing.T) {
 
 	select {
 	case <-done:
-		//worker exited cleanly
+		// worker exited cleanly
 	case <-time.After(2 * time.Second):
 		t.Error("worker did not stop after context was canceled")
 	}
@@ -167,4 +167,59 @@ func TestWorker_MultipleWorkerNoDuplicates(t *testing.T) {
 		}
 	}
 
+}
+
+func TestWorker_SendsHeartbeatsDuringLongJob(t *testing.T) {
+	s := store.NewMemoryStore()
+	id := s.AddJob("sleep 12")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	w := NewWorker(1, s)
+	go w.Start(ctx)
+
+	// Wait long enough for at least 2 heartbeats (an interval is 5s)
+	time.Sleep(12 * time.Second)
+
+	job, found := s.GetJob(id)
+	if !found {
+		t.Fatal("job not found")
+	}
+
+	if job.LastHeartbeat == nil {
+		t.Fatal("expected last_heartbeat to be set during long-running job")
+	}
+
+	// Heartbeat should have been updated recently (within the last 6 seconds)
+	elapsed := time.Since(*job.LastHeartbeat)
+	if elapsed > 6*time.Second {
+		t.Errorf("last heartbeat was %v ago, expected within 6s", elapsed)
+	}
+}
+
+func TestWorker_HeartbeatStopsAfterJobCompletes(t *testing.T) {
+	s := store.NewMemoryStore()
+	id := s.AddJob("echo hello") // finishes instantly
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	w := NewWorker(1, s)
+	go w.Start(ctx)
+
+	waitForStatus(t, s, id, store.StatusDone, 3*time.Second)
+
+	// Record the heartbeat timestamp (if any) right after completion
+	job, _ := s.GetJob(id)
+	heartbeatAfterDone := job.LastHeartbeat
+
+	// Wait longer than one heartbeat interval
+	time.Sleep(6 * time.Second)
+
+	// Heartbeat should not have advanced, the goroutine should be stopped
+	job, _ = s.GetJob(id)
+	if job.LastHeartbeat != nil && heartbeatAfterDone != nil && job.LastHeartbeat.After(*heartbeatAfterDone) {
+		t.Error("heartbeat continued after job completed, possible goroutine leak")
+	}
 }
