@@ -9,12 +9,14 @@ import (
 )
 
 const pollInterval = 1 * time.Second
+const heartbeatInterval = 5 * time.Second
 
 // JobSource is the minimal interface a Worker needs to fetch and report on jobs.
 // Both store.JobStore (in-process) and SchedulerClient (over HTTP) satisfy this.
 type JobSource interface {
 	ClaimJob() (*store.Job, bool)
 	UpdateJobStatus(id string, status store.JobStatus)
+	SendHeartbeat(id string) error
 }
 
 // Worker polls a JobSource and executes jobs
@@ -74,6 +76,11 @@ func (w *Worker) Start(ctx context.Context) {
 func (w *Worker) process(job *store.Job) {
 	log.Printf("[worker-%d] picking up job %s (attempt %d/%d): %q", w.id, job.ID, job.Attempts, job.MaxRetries, job.Command)
 
+	// Start a heartbeat goroutine, canceled when the job finishes
+	hbCtx, hbCancel := context.WithCancel(context.Background())
+	defer hbCancel()
+	go w.sendHeartbeats(hbCtx, job.ID)
+
 	err := w.executor.Execute(job.Command)
 	if err != nil {
 		if job.Attempts < job.MaxRetries {
@@ -89,4 +96,22 @@ func (w *Worker) process(job *store.Job) {
 
 	log.Printf("[worker-%d] job %s done", w.id, job.ID)
 	w.source.UpdateJobStatus(job.ID, store.StatusDone)
+}
+
+// sendHeartbeats periodically ping the source to signal the worker is still alive.
+// It stops when the context is canceled (i.e., the job finishes).
+func (w *Worker) sendHeartbeats(ctx context.Context, jobID string) {
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := w.source.SendHeartbeat(jobID); err != nil {
+				log.Printf("[worker-%d] heartbeat failed for job %s: %v", w.id, jobID, err)
+			}
+		}
+	}
 }
