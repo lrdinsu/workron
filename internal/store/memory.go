@@ -123,3 +123,10 @@ func (s *MemoryStore) UpdateHeartbeat(id string) {
 		job.LastHeartbeat = &t
 	}
 }
+
+// SendHeartbeat wraps UpdateHeartbeat to satisfy the worker.JobSource interface.
+// in-process, this never fails.
+func (s *MemoryStore) SendHeartbeat(id string) error {
+	s.UpdateHeartbeat(id)
+	return nil
+}
