@@ -10,18 +10,25 @@ import (
 
 const pollInterval = 1 * time.Second
 
-// Worker polls the job store and executes jobs
+// JobSource is the minimal interface a Worker needs to fetch and report on jobs.
+// Both store.JobStore (in-process) and SchedulerClient (over HTTP) satisfy this.
+type JobSource interface {
+	ClaimJob() (*store.Job, bool)
+	UpdateJobStatus(id string, status store.JobStatus)
+}
+
+// Worker polls a JobSource and executes jobs
 type Worker struct {
 	id       int
-	store    store.JobStore
+	source   JobSource
 	executor *Executor
 }
 
-// NewWorker creates a new Worker with the given ID and store
-func NewWorker(id int, s store.JobStore) *Worker {
+// NewWorker creates a new Worker with the given ID and job source.
+func NewWorker(id int, source JobSource) *Worker {
 	return &Worker{
 		id:       id,
-		store:    s,
+		source:   source,
 		executor: NewExecutor(),
 	}
 }
@@ -31,44 +38,55 @@ func NewWorker(id int, s store.JobStore) *Worker {
 func (w *Worker) Start(ctx context.Context) {
 	log.Printf("[worker-%d] started", w.id)
 
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
 	for {
+		// Check for shutdown before doing any work
 		select {
 		case <-ctx.Done():
 			// Context was canceled, scheduler is shutting down
 			log.Printf("[worker-%d] shutting down", w.id)
 			return
 		default:
-			job, found := w.store.ClaimJob()
-			if !found {
-				// No pending jobs, wait before polling again
-				time.Sleep(pollInterval)
-				continue
-			}
-
-			w.process(job)
 		}
+
+		job, found := w.source.ClaimJob()
+		if found {
+			w.process(job)
+			continue
+		}
+
+		// No pending jobs, wait for the next tick or context cancellation
+		select {
+		case <-ctx.Done():
+			log.Printf("[worker-%d] shutting down", w.id)
+			return
+		case <-ticker.C:
+		}
+
 	}
 }
 
-// process executes a single job and updates its status in the store.
-// If the job fails and has remaining retries, it is re-queued as pending.
-// If retries are exhausted, it is marked as failed permanently.
+// process executes a single job and updates its status via the source.
+// If running in-process (store.JobStore), the worker handles retries directly.
+// If running over HTTP (SchedulerClient), the scheduler handles retry decisions.
 func (w *Worker) process(job *store.Job) {
-	log.Printf("[worker-%d] picking up job %s (attempt %d/%d: %q", w.id, job.ID, job.Attempts, job.MaxRetries, job.Command)
+	log.Printf("[worker-%d] picking up job %s (attempt %d/%d): %q", w.id, job.ID, job.Attempts, job.MaxRetries, job.Command)
 
 	err := w.executor.Execute(job.Command)
 	if err != nil {
 		if job.Attempts < job.MaxRetries {
 			log.Printf("[worker-%d] job %s failed, retrying (attempt %d/%d): %v", w.id, job.ID, job.Attempts, job.MaxRetries, err)
-			w.store.UpdateJobStatus(job.ID, store.StatusPending)
+			w.source.UpdateJobStatus(job.ID, store.StatusPending)
 			return
 		}
 
 		log.Printf("[worker-%d] job %s failed permanently after %d attempts: %v", w.id, job.ID, job.Attempts, err)
-		w.store.UpdateJobStatus(job.ID, store.StatusFailed)
+		w.source.UpdateJobStatus(job.ID, store.StatusFailed)
 		return
 	}
 
 	log.Printf("[worker-%d] job %s done", w.id, job.ID)
-	w.store.UpdateJobStatus(job.ID, store.StatusDone)
+	w.source.UpdateJobStatus(job.ID, store.StatusDone)
 }

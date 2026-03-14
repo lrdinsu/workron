@@ -18,8 +18,9 @@ import (
 
 func main() {
 	// Parse CLI flags
+	mode := flag.String("mode", "scheduler", "scheduler (HTTP API only) | standalone (API + local workers)")
 	port := flag.Int("port", 8080, "port to listen on")
-	numWorkers := flag.Int("workers", 3, "number of concurrent workers")
+	numWorkers := flag.Int("workers", 3, "number of concurrent workers (standalone mode only)")
 	flag.Parse()
 
 	// Initialize store and server
@@ -30,17 +31,21 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start worker pool
+	// Only start local workers in standalone mode
 	var wg sync.WaitGroup
-	for i := 1; i <= *numWorkers; i++ {
-		wg.Add(1)
-		w := worker.NewWorker(i, s)
-		go func() {
-			defer wg.Done()
-			w.Start(ctx)
-		}()
+	if *mode == "standalone" {
+		for i := 1; i <= *numWorkers; i++ {
+			wg.Add(1)
+			w := worker.NewWorker(i, s)
+			go func() {
+				defer wg.Done()
+				w.Start(ctx)
+			}()
+		}
+		log.Printf("[main] standalone mode: started %d local workers", *numWorkers)
+	} else {
+		log.Println("[main] scheduler mode: waiting for remote workers")
 	}
-	log.Printf("[main] started %d workers", *numWorkers)
 
 	// Start HTTP server in a goroutine so it doesn't block signal handling
 	addr := fmt.Sprintf(":%d", *port)
