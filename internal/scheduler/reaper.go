@@ -1,0 +1,53 @@
+package scheduler
+
+import (
+	"context"
+	"log"
+	"time"
+
+	"github.com/lrdinsu/workron/internal/store"
+)
+
+const (
+	reapInterval     = 10 * time.Second
+	heartbeatTimeout = 30 * time.Second
+)
+
+// StartReaper runs a background goroutine that detects dead workers.
+// It checks all running jobs for stale or missing heartbeats and either
+// re-queues them (if retries remain) or marks them permanently failed.
+func StartReaper(ctx context.Context, s store.JobStore) {
+	ticker := time.NewTicker(reapInterval)
+	defer ticker.Stop()
+
+	log.Println("[reaper] started")
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("[reaper] shutting down")
+			return
+		case <-ticker.C:
+			reap(s)
+		}
+	}
+}
+
+// reap scans running jobs and re-queues or fails any with stale heartbeats.
+func reap(s store.JobStore) {
+	now := time.Now()
+	for _, job := range s.ListRunningJobs() {
+		if job.LastHeartbeat != nil && now.Sub(*job.LastHeartbeat) <= heartbeatTimeout {
+			continue // healthy heartbeat, skip
+		}
+
+		// No heartbeat at all, or heartbeat is stale: the worker is assumed dead
+		if job.Attempts < job.MaxRetries {
+			log.Printf("[reaper] job %s has stale heartbeat, re-queuing (attempt %d/%d)", job.ID, job.Attempts, job.MaxRetries)
+			s.UpdateJobStatus(job.ID, store.StatusPending)
+		} else {
+			log.Printf("[reaper] job %s has stale heartbeat, marking failed after %d attempts", job.ID, job.Attempts)
+			s.UpdateJobStatus(job.ID, store.StatusFailed)
+		}
+	}
+}
