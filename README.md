@@ -8,6 +8,8 @@ A lightweight distributed job scheduler written in Go.
 
 Workron is a distributed job scheduler that accepts jobs via a REST API and executes them across concurrent workers. It supports two deployment modes: a single-process standalone mode where the scheduler and workers share memory, and a distributed mode where the scheduler and workers run as separate binaries communicating over HTTP.
 
+Workers send periodic heartbeats while processing jobs. A background reaper on the scheduler detects stale heartbeats and re-queues orphaned jobs, ensuring no work is silently lost when a worker crashes.
+
 If you are curious about the architectural decisions and trade-offs behind this project, I wrote about it here:
 📝 [Lynn's blog](https://lrdinsu.github.io)
 
@@ -20,10 +22,10 @@ If you are curious about the architectural decisions and trade-offs behind this 
 - Multiple concurrent workers with mutex-protected atomic job claiming
 - Automatic retry on failure, re-queued up to `MaxRetries` times before marked permanently failed
 - Two deployment modes: standalone (single process) or distributed (separate scheduler + worker binaries over HTTP)
+- Heartbeat-based failure detection — workers send heartbeats every 5 seconds, scheduler re-queues jobs with stale or missing heartbeats after 30 seconds
 - Graceful shutdown — workers finish their current job before exiting
 
 **Planned**
-- [ ] Heartbeat-based worker failure detection and job re-queuing
 - [ ] Job persistence with SQLite
 - [ ] Cron-style scheduling
 - [ ] Job priority queue
@@ -46,12 +48,16 @@ Everything runs in a single process. Workers access the job store directly throu
 │                  [pending]       Worker 1    │
 │                  [running]       Worker 2    │
 │                  [done]          Worker 3    │
+│                                              │
+│   Reaper (background goroutine)              │
+│   └─ scans running jobs every 10s            │
+│   └─ re-queues jobs with stale heartbeats    │
 └──────────────────────────────────────────────┘
 ```
 
 ### Distributed Mode
 
-The scheduler and workers run as separate binaries. Workers poll the scheduler over HTTP to claim jobs and report results. Workers can run on different machines.
+The scheduler and workers run as separate binaries. Workers poll the scheduler over HTTP to claim jobs, send heartbeats, and report results. Workers can run on different machines.
 
 ```
 ┌─────────────────────┐         ┌──────────────────────┐
@@ -59,7 +65,11 @@ The scheduler and workers run as separate binaries. Workers poll the scheduler o
 │                     │  HTTP   │                      │
 │  REST API           │◄───────►│  Worker Process A    │
 │  Job Store          │         │  Worker Process B    │
-│                     │         │  Worker Process C    │
+│  Reaper             │         │  Worker Process C    │
+│                     │         │                      │
+│  Detects dead       │         │  Sends heartbeats    │
+│  workers via stale  │         │  every 5s while      │
+│  heartbeats         │         │  processing a job    │
 └─────────────────────┘         └──────────────────────┘
     Source of truth                   Any machine
 ```
@@ -183,6 +193,26 @@ curl -X POST http://localhost:8080/jobs/{id}/fail
 
 The scheduler decides whether to retry (re-queue as `pending`) or mark as permanently `failed` based on the attempt count.
 
+### Send heartbeat
+
+```bash
+curl -X POST http://localhost:8080/jobs/{id}/heartbeat
+```
+
+Workers call this automatically every 5 seconds while processing a job. Returns `200` on success, `404` if job not found, `409` if job is not running.
+
+---
+
+## Failure Detection
+
+When a worker crashes mid-job, the scheduler detects it through missing heartbeats. A background reaper goroutine runs every 10 seconds and checks all running jobs:
+
+- If a job's last heartbeat is older than 30 seconds (or was never set), the worker is assumed dead
+- If the job has retries remaining, it is re-queued as `pending` for another worker to pick up
+- If retries are exhausted, the job is marked as permanently `failed`
+
+This ensures no job gets stuck in `running` forever, even if a worker process is killed without warning.
+
 ---
 
 ## Project Structure
@@ -201,7 +231,9 @@ workron/
 │   │   └── memory_test.go
 │   ├── scheduler/
 │   │   ├── server.go            # HTTP handlers
-│   │   └── server_test.go
+│   │   ├── server_test.go
+│   │   ├── reaper.go            # Background heartbeat timeout checker
+│   │   └── reaper_test.go
 │   └── worker/
 │       ├── worker.go            # Poll and execute loop
 │       ├── worker_test.go
