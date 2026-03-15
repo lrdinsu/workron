@@ -38,8 +38,8 @@ func (s *MemoryStore) AddJob(command string) string {
 	return id
 }
 
-// ClaimJob atomically finds a pending job and marks it as running
-// This ensures two workers don't grab the same job
+// ClaimJob atomically finds a pending job and marks it as running.
+// This ensures two workers don't grab the same job.
 func (s *MemoryStore) ClaimJob() (*Job, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -93,22 +93,24 @@ func (s *MemoryStore) ListJobs() []*Job {
 
 	list := make([]*Job, 0, len(s.jobs))
 	for _, job := range s.jobs {
-		list = append(list, job)
+		jobCopy := *job
+		list = append(list, &jobCopy)
 	}
 	return list
 }
 
+// ListRunningJobs returns all jobs currently in running status
 func (s *MemoryStore) ListRunningJobs() []*Job {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	var jobs []*Job
 	for _, j := range s.jobs {
 		if j.Status == StatusRunning {
-			jobs = append(jobs, j)
+			jobCopy := *j
+			jobs = append(jobs, &jobCopy)
 		}
 	}
-
 	return jobs
 }
 
@@ -125,8 +127,18 @@ func (s *MemoryStore) UpdateHeartbeat(id string) {
 }
 
 // SendHeartbeat wraps UpdateHeartbeat to satisfy the worker.JobSource interface.
-// in-process, this never fails.
+// In-process, this never fails.
 func (s *MemoryStore) SendHeartbeat(id string) error {
 	s.UpdateHeartbeat(id)
 	return nil
+}
+
+// SetLastHeartbeat sets the heartbeat to a specific time. Used for testing the reaper.
+func (s *MemoryStore) SetLastHeartbeat(id string, t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if job, exists := s.jobs[id]; exists {
+		job.LastHeartbeat = &t
+	}
 }
