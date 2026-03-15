@@ -31,6 +31,9 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Start the heartbeat reaper to detect dead workers
+	go scheduler.StartReaper(ctx, s)
+
 	// Only start local workers in standalone mode
 	var wg sync.WaitGroup
 	if *mode == "standalone" {
