@@ -11,7 +11,9 @@ Workron is a distributed job scheduler that accepts jobs via a REST API and exec
 Workers send periodic heartbeats while processing jobs. A background reaper on the scheduler detects stale heartbeats and re-queues orphaned jobs, ensuring no work is silently lost when a worker crashes.
 
 If you are curious about the architectural decisions and trade-offs behind this project, I wrote about it here:
-📝 [Lynn's blog](https://lrdinsu.github.io)
+
+- 📝 [Before the Code: Designing a Distributed Job Scheduler in Go](https://lrdinsu.github.io/posts/designing-distributed-job-scheduler-go)
+- 📝 [Building the Concurrent Monolith: Atomic Job Claiming in Go](https://lrdinsu.github.io/posts/designing-distributed-job-scheduler-go)
 
 ---
 
