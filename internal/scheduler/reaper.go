@@ -37,7 +37,13 @@ func StartReaper(ctx context.Context, s store.JobStore) {
 func reap(s store.JobStore) {
 	now := time.Now()
 	for _, job := range s.ListRunningJobs() {
-		if job.LastHeartbeat != nil && now.Sub(*job.LastHeartbeat) <= heartbeatTimeout {
+		// Use heartbeat if available, otherwise fall back to when the job was claimed
+		lastContact := job.LastHeartbeat
+		if lastContact == nil {
+			lastContact = job.StartedAt
+		}
+
+		if lastContact != nil && now.Sub(*lastContact) <= heartbeatTimeout {
 			continue // healthy heartbeat, skip
 		}
 

@@ -84,13 +84,14 @@ func TestReap_IgnoresPendingAndDoneJobs(t *testing.T) {
 func TestReap_RequeuesJobWithNilHeartbeat(t *testing.T) {
 	s := store.NewMemoryStore()
 	id := s.AddJob("echo hello")
-	s.ClaimJob() // running, but no heartbeat ever sent
+	s.ClaimJob() // running, no heartbeat, but StartedAt is now
 
+	// With a fresh StartedAt, reaper should leave it alone
 	reap(s)
 
 	job, _ := s.GetJob(id)
-	if job.Status != store.StatusPending {
-		t.Errorf("expected status pending, got %s", job.Status)
+	if job.Status != store.StatusRunning {
+		t.Errorf("expected status running, got %s", job.Status)
 	}
 }
 
@@ -111,5 +112,21 @@ func TestStartReaper_StopsOnContextCancel(t *testing.T) {
 		// reaper exited cleanly
 	case <-time.After(2 * time.Second):
 		t.Error("reaper did not stop after context was canceled")
+	}
+}
+
+func TestReap_RequeuesJobWithNilHeartbeatAndStaleStart(t *testing.T) {
+	s := store.NewMemoryStore()
+	id := s.AddJob("echo hello")
+	s.ClaimJob()
+
+	// Simulate a job that was claimed 60 seconds ago but never sent a heartbeat
+	s.SetStartedAt(id, time.Now().Add(-60*time.Second))
+
+	reap(s)
+
+	job, _ := s.GetJob(id)
+	if job.Status != store.StatusPending {
+		t.Errorf("expected status pending, got %s", job.Status)
 	}
 }

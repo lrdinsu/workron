@@ -49,6 +49,7 @@ func (s *MemoryStore) ClaimJob() (*Job, bool) {
 			job.Status = StatusRunning
 			t := time.Now()
 			job.StartedAt = &t
+			job.LastHeartbeat = nil
 			job.Attempts++
 			jobCopy := *job
 			return &jobCopy, true
@@ -140,5 +141,15 @@ func (s *MemoryStore) SetLastHeartbeat(id string, t time.Time) {
 
 	if job, exists := s.jobs[id]; exists {
 		job.LastHeartbeat = &t
+	}
+}
+
+// SetStartedAt sets the start time to a specific time. Used for testing the reaper.
+func (s *MemoryStore) SetStartedAt(id string, t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if job, exists := s.jobs[id]; exists {
+		job.StartedAt = &t
 	}
 }
