@@ -1,6 +1,9 @@
 package store
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // JobStore defines the behavior any storage backend must have
 type JobStore interface {
@@ -34,4 +37,9 @@ type Job struct {
 	LastHeartbeat *time.Time `json:"last_heart_beat,omitempty"`
 	MaxRetries    int        `json:"max_retries"`
 	Attempts      int        `json:"attempts"`
+}
+
+// Generate a unique ID using UnixNano
+func generateID() string {
+	return fmt.Sprintf("job-%d", time.Now().UnixNano())
 }
