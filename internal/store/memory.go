@@ -1,7 +1,6 @@
 package store
 
 import (
-	"fmt"
 	"sync"
 	"time"
 )
@@ -24,8 +23,7 @@ func (s *MemoryStore) AddJob(command string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Generate a unique ID using UnixNano
-	id := fmt.Sprintf("job-%d", time.Now().UnixNano())
+	id := generateID()
 
 	s.jobs[id] = &Job{
 		ID:         id,
