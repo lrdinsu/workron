@@ -124,21 +124,90 @@ func scanJob(row *sql.Row) (*Job, bool) {
 }
 
 func (s *SQLiteStore) ClaimJob() (*Job, bool) {
-	panic("sqlite: ClaimJob not implemented yet")
+	row := s.db.QueryRow(`
+		UPDATE jobs SET status = 'running', started_at = ?, attempts = attempts + 1, last_heartbeat = NULL
+		WHERE id = (SELECT id FROM jobs WHERE status = 'pending' LIMIT 1)
+		RETURNING id, command, status, created_at, started_at, done_at,
+		          last_heartbeat, max_retries, attempts`,
+		time.Now(),
+	)
+	return scanJob(row)
 }
 
 func (s *SQLiteStore) UpdateJobStatus(id string, status JobStatus) {
-	panic("sqlite: UpdateJobStatus not implemented yet")
+	var doneAt *time.Time
+	if status == StatusDone || status == StatusFailed {
+		t := time.Now()
+		doneAt = &t
+	}
+
+	_, err := s.db.Exec(
+		`UPDATE jobs SET status = ?, done_at = ? WHERE id = ?`,
+		string(status), doneAt, id,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: update job status: %v", err))
+	}
 }
 
 func (s *SQLiteStore) ListJobs() []*Job {
-	panic("sqlite: ListJobs not implemented yet")
+	return s.queryJobs(`SELECT id, command, status, created_at, started_at, done_at,
+	                            last_heartbeat, max_retries, attempts FROM jobs`)
 }
 
 func (s *SQLiteStore) ListRunningJobs() []*Job {
-	panic("sqlite: ListRunningJobs not implemented yet")
+	return s.queryJobs(`SELECT id, command, status, created_at, started_at, done_at,
+	                            last_heartbeat, max_retries, attempts
+	                     FROM jobs WHERE status = 'running'`)
 }
 
 func (s *SQLiteStore) UpdateHeartbeat(id string) {
-	panic("sqlite: UpdateHeartbeat not implemented yet")
+	_, err := s.db.Exec(
+		`UPDATE jobs SET last_heartbeat = ? WHERE id = ?`,
+		time.Now(), id,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: update heartbeat: %v", err))
+	}
+}
+
+// queryJobs runs a SELECT query and scans all result rows into Jobs.
+func (s *SQLiteStore) queryJobs(query string, args ...any) []*Job {
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: query jobs: %v", err))
+	}
+	defer func() { _ = rows.Close() }()
+
+	var jobs []*Job
+	for rows.Next() {
+		var j Job
+		var status string
+		var startedAt, doneAt, lastHeartbeat sql.NullTime
+
+		if err := rows.Scan(
+			&j.ID, &j.Command, &status, &j.CreatedAt,
+			&startedAt, &doneAt, &lastHeartbeat,
+			&j.MaxRetries, &j.Attempts,
+		); err != nil {
+			panic(fmt.Sprintf("sqlite: scan job row: %v", err))
+		}
+
+		j.Status = JobStatus(status)
+		if startedAt.Valid {
+			j.StartedAt = &startedAt.Time
+		}
+		if doneAt.Valid {
+			j.DoneAt = &doneAt.Time
+		}
+		if lastHeartbeat.Valid {
+			j.LastHeartbeat = &lastHeartbeat.Time
+		}
+		jobs = append(jobs, &j)
+	}
+
+	if len(jobs) == 0 {
+		return []*Job{} // return an empty slice (not nil slice)
+	}
+	return jobs
 }
