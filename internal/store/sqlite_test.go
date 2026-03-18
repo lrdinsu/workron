@@ -37,6 +37,54 @@ func TestSQLite_GetJobReturnsACopy(t *testing.T) {
 	testGetJobReturnsACopy(t, newTestSQLiteStore)
 }
 
+func TestSQLite_ClaimJobReturnsJob(t *testing.T) {
+	testClaimJobReturnsJob(t, newTestSQLiteStore)
+}
+
+func TestSQLite_ClaimJobEmptyStore(t *testing.T) {
+	testClaimJobEmptyStore(t, newTestSQLiteStore)
+}
+
+func TestSQLite_ClaimJobSkipsNonPending(t *testing.T) {
+	testClaimJobSkipsNonPending(t, newTestSQLiteStore)
+}
+
+func TestSQLite_ClaimJobNoDuplicates(t *testing.T) {
+	testClaimJobNoDuplicates(t, newTestSQLiteStore)
+}
+
+func TestSQLite_UpdateJobStatusDone(t *testing.T) {
+	testUpdateJobStatusDone(t, newTestSQLiteStore)
+}
+
+func TestSQLite_UpdateJobStatusFailed(t *testing.T) {
+	testUpdateJobStatusFailed(t, newTestSQLiteStore)
+}
+
+func TestSQLite_UpdateJobStatusRequeue(t *testing.T) {
+	testUpdateJobStatusRequeue(t, newTestSQLiteStore)
+}
+
+func TestSQLite_ListJobsEmpty(t *testing.T) {
+	testListJobsEmpty(t, newTestSQLiteStore)
+}
+
+func TestSQLite_ListJobsReturnsAll(t *testing.T) {
+	testListJobsReturnsAll(t, newTestSQLiteStore)
+}
+
+func TestSQLite_ListRunningJobsEmpty(t *testing.T) {
+	testListRunningJobsEmpty(t, newTestSQLiteStore)
+}
+
+func TestSQLite_ListRunningJobsFilters(t *testing.T) {
+	testListRunningJobsFilters(t, newTestSQLiteStore)
+}
+
+func TestSQLite_UpdateHeartbeat(t *testing.T) {
+	testUpdateHeartbeat(t, newTestSQLiteStore)
+}
+
 // --- SQLite-specific tests ---
 
 func TestSQLite_PersistenceAcrossReopen(t *testing.T) {

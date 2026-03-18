@@ -29,6 +29,54 @@ func TestMemory_GetJobReturnsACopy(t *testing.T) {
 	testGetJobReturnsACopy(t, newTestMemoryStore)
 }
 
+func TestMemory_ClaimJobReturnsJob(t *testing.T) {
+	testClaimJobReturnsJob(t, newTestMemoryStore)
+}
+
+func TestMemory_ClaimJobEmptyStore(t *testing.T) {
+	testClaimJobEmptyStore(t, newTestMemoryStore)
+}
+
+func TestMemory_ClaimJobSkipsNonPending(t *testing.T) {
+	testClaimJobSkipsNonPending(t, newTestMemoryStore)
+}
+
+func TestMemory_ClaimJobNoDuplicates(t *testing.T) {
+	testClaimJobNoDuplicates(t, newTestMemoryStore)
+}
+
+func TestMemory_UpdateJobStatusDone(t *testing.T) {
+	testUpdateJobStatusDone(t, newTestMemoryStore)
+}
+
+func TestMemory_UpdateJobStatusFailed(t *testing.T) {
+	testUpdateJobStatusFailed(t, newTestMemoryStore)
+}
+
+func TestMemory_UpdateJobStatusRequeue(t *testing.T) {
+	testUpdateJobStatusRequeue(t, newTestMemoryStore)
+}
+
+func TestMemory_ListJobsEmpty(t *testing.T) {
+	testListJobsEmpty(t, newTestMemoryStore)
+}
+
+func TestMemory_ListJobsReturnsAll(t *testing.T) {
+	testListJobsReturnsAll(t, newTestMemoryStore)
+}
+
+func TestMemory_ListRunningJobsEmpty(t *testing.T) {
+	testListRunningJobsEmpty(t, newTestMemoryStore)
+}
+
+func TestMemory_ListRunningJobsFilters(t *testing.T) {
+	testListRunningJobsFilters(t, newTestMemoryStore)
+}
+
+func TestMemory_UpdateHeartbeat(t *testing.T) {
+	testUpdateHeartbeat(t, newTestMemoryStore)
+}
+
 func TestMemoryStore_AddAndClaimJob(t *testing.T) {
 	store := NewMemoryStore()
 
