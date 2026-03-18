@@ -187,6 +187,12 @@ func (s *SQLiteStore) UpdateHeartbeat(id string) {
 	}
 }
 
+// SendHeartbeat wraps UpdateHeartbeat to satisfy the worker.JobSource interface.
+func (s *SQLiteStore) SendHeartbeat(id string) error {
+	s.UpdateHeartbeat(id)
+	return nil
+}
+
 // queryJobs runs a SELECT query and scans all result rows into Jobs.
 func (s *SQLiteStore) queryJobs(query string, args ...any) []*Job {
 	rows, err := s.db.Query(query, args...)

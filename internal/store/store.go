@@ -14,6 +14,7 @@ type JobStore interface {
 	ListRunningJobs() []*Job
 	UpdateJobStatus(id string, status JobStatus)
 	UpdateHeartbeat(id string)
+	SendHeartbeat(id string) error
 }
 
 // JobStatus defines the valid states for a job

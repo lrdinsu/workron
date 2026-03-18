@@ -21,10 +21,25 @@ func main() {
 	mode := flag.String("mode", "scheduler", "scheduler (HTTP API only) | standalone (API + local workers)")
 	port := flag.Int("port", 8080, "port to listen on")
 	numWorkers := flag.Int("workers", 3, "number of concurrent workers (standalone mode only)")
+	dbPath := flag.String("db", "", "path to SQLite database file (empty = in-memory store)")
 	flag.Parse()
 
-	// Initialize store and server
-	s := store.NewMemoryStore()
+	// Initialize store: SQLite if --db is set, otherwise in-memory
+	var s store.JobStore
+	if *dbPath != "" {
+		sqliteStore, err := store.NewSQLiteStore(*dbPath)
+		if err != nil {
+			log.Fatalf("[main] failed to open database: %v", err)
+		}
+		defer func() { _ = sqliteStore.Close() }()
+		s = sqliteStore
+		log.Printf("[main] using SQLite store: %s", *dbPath)
+	} else {
+		s = store.NewMemoryStore()
+		log.Println("[main] using in-memory store")
+	}
+
+	// Initialize the server
 	srv := scheduler.NewServer(s)
 
 	// Context for graceful shutdown, canceled when OS signal is received
