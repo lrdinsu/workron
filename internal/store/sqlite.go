@@ -22,11 +22,27 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	// WAL mode allows concurrent reads while a write is in progress.
-	// Without it, the reaper scanning jobs would block workers from claiming them.
+	// SQLite only supports one writer at a time. Go's default connection pool
+	// hands separate connections to concurrent goroutines, causing SQLITE_BUSY
+	// errors and per-connection pragma loss. Limiting to one connection serializes
+	// all access through Go's pool, eliminating lock contention at the DB level.
+	db.SetMaxOpenConns(1)
+
+	// WAL mode provides faster writes by appending to a log instead of copying
+	// pages to a rollback journal. With a single connection the concurrency
+	// benefit (readers not blocking writers) is unused, but WAL remains the
+	// better journal mode for write performance regardless of pool size.
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enable WAL mode: %w", err)
+	}
+
+	// Safety net: if SQLite encounters internal lock contention (e.g., during
+	// crash recovery), retry for up to 5 seconds instead of failing immediately.
+	// Under normal operation with a single connection this should never trigger.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set busy timeout: %w", err)
 	}
 
 	if err := migrate(db); err != nil {
