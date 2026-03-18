@@ -110,6 +110,9 @@ func (s *MemoryStore) ListRunningJobs() []*Job {
 			jobs = append(jobs, &jobCopy)
 		}
 	}
+	if len(jobs) == 0 {
+		return []*Job{}
+	}
 	return jobs
 }
 
