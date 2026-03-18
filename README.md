@@ -8,27 +8,30 @@ A lightweight distributed job scheduler written in Go.
 
 Workron is a distributed job scheduler that accepts jobs via a REST API and executes them across concurrent workers. It supports two deployment modes: a single-process standalone mode where the scheduler and workers share memory, and a distributed mode where the scheduler and workers run as separate binaries communicating over HTTP.
 
+Jobs are persisted to SQLite, so in-flight and completed work survives a full scheduler restart. An in-memory store is also available for development and testing.
+
 Workers send periodic heartbeats while processing jobs. A background reaper on the scheduler detects stale heartbeats and re-queues orphaned jobs, ensuring no work is silently lost when a worker crashes.
 
-If you are curious about the architectural decisions and trade-offs behind this project, I wrote about it here:
+If you are curious about the design decisions and trade-offs behind this project, I wrote about the journey here:
 
-- 📝 [Before the Code: Designing a Distributed Job Scheduler in Go](https://lrdinsu.github.io/posts/designing-distributed-job-scheduler-go)
-- 📝 [Building the Concurrent Monolith: Atomic Job Claiming in Go](https://lrdinsu.github.io/posts/designing-distributed-job-scheduler-go)
+- 📝 [Before the Code: Designing a Distributed Job Scheduler in Go](https://lrdinsu.github.io/posts/designing-distributed-job-scheduler-go/)
+- 📝 [Building the Concurrent Monolith: Atomic Job Claiming in Go](https://lrdinsu.github.io/posts/building-concurrent-monolith-atomic-job-claiming-go/)
+- 📝 [Splitting and Surviving Failures: HTTP Workers and Heartbeat Detection in Go](https://lrdinsu.github.io/posts/splitting-and-surviving-failures-workron/)
 
 ---
 
 ## Features
 
 - Submit and monitor jobs via REST API
-- In-memory job queue with status tracking (`pending` → `running` → `done` / `failed`)
-- Multiple concurrent workers with mutex-protected atomic job claiming
+- Pluggable storage: in-memory store for development, SQLite for persistence across restarts
+- Multiple concurrent workers with atomic job claiming (mutex in memory, `UPDATE ... RETURNING` in SQLite)
 - Automatic retry on failure, re-queued up to `MaxRetries` times before marked permanently failed
 - Two deployment modes: standalone (single process) or distributed (separate scheduler + worker binaries over HTTP)
 - Heartbeat-based failure detection — workers send heartbeats every 5 seconds, scheduler re-queues jobs with stale or missing heartbeats after 30 seconds
 - Graceful shutdown — workers finish their current job before exiting
 
 **Planned**
-- [ ] Job persistence with SQLite
+- [ ] DAG-based job dependencies
 - [ ] Cron-style scheduling
 - [ ] Job priority queue
 - [ ] Web dashboard
@@ -46,7 +49,7 @@ Everything runs in a single process. Workers access the job store directly throu
 │               Single Go Process              │
 │                                              │
 │   REST API  ──►  Job Store  ◄──  Workers     │
-│   (HTTP)        (in-memory)     (goroutines) │
+│   (HTTP)       (memory/SQLite)  (goroutines) │
 │                  [pending]       Worker 1    │
 │                  [running]       Worker 2    │
 │                  [done]          Worker 3    │
@@ -67,11 +70,12 @@ The scheduler and workers run as separate binaries. Workers poll the scheduler o
 │                     │  HTTP   │                      │
 │  REST API           │◄───────►│  Worker Process A    │
 │  Job Store          │         │  Worker Process B    │
-│  Reaper             │         │  Worker Process C    │
-│                     │         │                      │
-│  Detects dead       │         │  Sends heartbeats    │
-│  workers via stale  │         │  every 5s while      │
-│  heartbeats         │         │  processing a job    │
+│  (memory/SQLite)    │         │  Worker Process C    │
+│  Reaper             │         │                      │
+│                     │         │  Sends heartbeats    │
+│  Detects dead       │         │  every 5s while      │
+│  workers via stale  │         │  processing a job    │
+│  heartbeats         │         │                      │
 └─────────────────────┘         └──────────────────────┘
     Source of truth                   Any machine
 ```
@@ -99,9 +103,11 @@ go mod tidy
 Run the scheduler and workers in a single process:
 
 ```bash
+# In-memory store
 make run-standalone
-# or
-go run ./cmd/scheduler --mode=standalone --port=8080 --workers=3
+
+# With SQLite persistence
+make run-standalone-sqlite
 ```
 
 ### Distributed Mode
@@ -109,15 +115,14 @@ go run ./cmd/scheduler --mode=standalone --port=8080 --workers=3
 Start the scheduler and workers separately:
 
 ```bash
-# Terminal 1: start the scheduler
-make run
-# or
-go run ./cmd/scheduler --port=8080
+# Terminal 1: start the scheduler (with SQLite)
+make run-scheduler-sqlite
 
 # Terminal 2: start remote workers
 make run-worker
-# or
-go run ./cmd/worker --scheduler=http://localhost:8080 --workers=3
+
+# Terminal 3: submit jobs
+curl -X POST http://localhost:8080/jobs -d '{"command":"echo hello"}'
 ```
 
 ### CLI Flags
@@ -129,6 +134,7 @@ go run ./cmd/worker --scheduler=http://localhost:8080 --workers=3
 | `--mode` | `scheduler` | `scheduler` (HTTP API only) or `standalone` (API + local workers) |
 | `--port` | `8080` | Port for the REST API |
 | `--workers` | `3` | Number of local workers (standalone mode only) |
+| `--db` | `""` | Path to SQLite database file (empty = in-memory store) |
 
 **Worker** (`cmd/worker`)
 
@@ -217,6 +223,18 @@ This ensures no job gets stuck in `running` forever, even if a worker process is
 
 ---
 
+## Persistence
+
+Workron supports two storage backends, selectable at startup via the `--db` flag:
+
+**In-memory store** (default) — jobs live only as long as the process runs. Fast, zero dependencies, ideal for development and testing.
+
+**SQLite store** (`--db=workron.db`) — jobs persist to a single file on disk. The scheduler can crash and restart without losing any job state. Uses WAL mode for write performance and a single-connection pool to avoid SQLite's write lock contention. The first external dependency (`modernc.org/sqlite`, a pure Go port) — no C compiler or Docker required.
+
+Both backends implement the same `JobStore` interface. The server, workers, and reaper are unaware of which store they're using.
+
+---
+
 ## Project Structure
 
 ```
@@ -230,7 +248,10 @@ workron/
 │   ├── store/
 │   │   ├── store.go             # JobStore interface, Job struct, JobStatus
 │   │   ├── memory.go            # In-memory store implementation
-│   │   └── memory_test.go
+│   │   ├── memory_test.go
+│   │   ├── sqlite.go            # SQLite store implementation
+│   │   ├── sqlite_test.go
+│   │   └── store_test.go        # Shared compliance tests for all store backends
 │   ├── scheduler/
 │   │   ├── server.go            # HTTP handlers
 │   │   ├── server_test.go
@@ -246,6 +267,7 @@ workron/
 ├── Makefile
 ├── .gitignore
 ├── go.mod
+├── go.sum
 └── README.md
 ```
 
@@ -258,8 +280,8 @@ workron/
 | Language | Go 1.22+ |
 | HTTP | `net/http` (stdlib only) |
 | Job execution | `os/exec` (stdlib) |
-| Storage | In-memory (SQLite planned) |
-| External dependencies | None |
+| Storage | In-memory or SQLite (`modernc.org/sqlite`) |
+| External dependencies | `modernc.org/sqlite` (pure Go, no CGo) |
 
 ---
 
