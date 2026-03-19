@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -69,7 +70,8 @@ func migrate(db *sql.DB) error {
 		done_at        DATETIME,
 		last_heartbeat DATETIME,
 		max_retries    INTEGER DEFAULT 3,
-		attempts       INTEGER DEFAULT 0
+		attempts       INTEGER DEFAULT 0,
+		depends_on     TEXT    DEFAULT '[]'
 	)`
 	_, err := db.Exec(schema)
 	return err
@@ -77,15 +79,26 @@ func migrate(db *sql.DB) error {
 
 // JobStore implementation
 
-func (s *SQLiteStore) AddJob(command string) string {
+func (s *SQLiteStore) AddJob(command string, dependsOn []string) string {
 	id := generateID()
 	now := time.Now()
 
-	_, err := s.db.Exec(
-		`INSERT INTO jobs (id, command, status, created_at, max_retries, attempts)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		id, command, string(StatusPending), now, 3, 0,
+	status := StatusPending
+	if len(dependsOn) > 0 {
+		status = StatusBlocked
+	}
+
+	depsJSON, err := json.Marshal(dependsOn)
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: marshal depends_on: %v", err))
+	}
+
+	_, err = s.db.Exec(
+		`INSERT INTO jobs (id, command, status, created_at, max_retries, attempts, depends_on)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, command, string(status), now, 3, 0, string(depsJSON),
 	)
+
 	if err != nil {
 		// Only fails on disk full or DB corruption, surface is loudly
 		// rather than silently dropping a job.
@@ -98,45 +111,10 @@ func (s *SQLiteStore) AddJob(command string) string {
 func (s *SQLiteStore) GetJob(id string) (*Job, bool) {
 	row := s.db.QueryRow(
 		`SELECT id, command, status, created_at, started_at, done_at,
-		        last_heartbeat, max_retries, attempts
+		        last_heartbeat, max_retries, attempts, depends_on
 		 FROM jobs WHERE id = ?`, id,
 	)
 	return scanJob(row)
-}
-
-// scanJob scans a single database row into a Job.
-// Column order must match: id, command, status, created_at, started_at,
-// done_at, last_heartbeat, max_retries, attempts.
-// This same order is used by GetJob's SELECT and ClaimJob's RETURNING *.
-func scanJob(row *sql.Row) (*Job, bool) {
-	var j Job
-	var status string
-	var startedAt, doneAt, lastHeartbeat sql.NullTime
-
-	err := row.Scan(
-		&j.ID, &j.Command, &status, &j.CreatedAt,
-		&startedAt, &doneAt, &lastHeartbeat,
-		&j.MaxRetries, &j.Attempts,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, false
-	}
-	if err != nil {
-		panic(fmt.Sprintf("sqlite: scan job: %v", err))
-	}
-
-	j.Status = JobStatus(status)
-	if startedAt.Valid {
-		j.StartedAt = &startedAt.Time
-	}
-	if doneAt.Valid {
-		j.DoneAt = &doneAt.Time
-	}
-	if lastHeartbeat.Valid {
-		j.LastHeartbeat = &lastHeartbeat.Time
-	}
-
-	return &j, true
 }
 
 func (s *SQLiteStore) ClaimJob() (*Job, bool) {
@@ -144,7 +122,7 @@ func (s *SQLiteStore) ClaimJob() (*Job, bool) {
 		UPDATE jobs SET status = 'running', started_at = ?, attempts = attempts + 1, last_heartbeat = NULL
 		WHERE id = (SELECT id FROM jobs WHERE status = 'pending' LIMIT 1)
 		RETURNING id, command, status, created_at, started_at, done_at,
-		          last_heartbeat, max_retries, attempts`,
+		          last_heartbeat, max_retries, attempts, depends_on`,
 		time.Now(),
 	)
 	return scanJob(row)
@@ -168,12 +146,12 @@ func (s *SQLiteStore) UpdateJobStatus(id string, status JobStatus) {
 
 func (s *SQLiteStore) ListJobs() []*Job {
 	return s.queryJobs(`SELECT id, command, status, created_at, started_at, done_at,
-	                            last_heartbeat, max_retries, attempts FROM jobs`)
+	                            last_heartbeat, max_retries, attempts, depends_on FROM jobs`)
 }
 
 func (s *SQLiteStore) ListRunningJobs() []*Job {
 	return s.queryJobs(`SELECT id, command, status, created_at, started_at, done_at,
-	                            last_heartbeat, max_retries, attempts
+	                            last_heartbeat, max_retries, attempts, depends_on
 	                     FROM jobs WHERE status = 'running'`)
 }
 
@@ -193,6 +171,46 @@ func (s *SQLiteStore) SendHeartbeat(id string) error {
 	return nil
 }
 
+// --- Scan helpers ---
+
+// scanJob scans a single database row into a Job.
+// Column order must match: id, command, status, created_at, started_at,
+// done_at, last_heartbeat, max_retries, attempts, depends_on.
+func scanJob(row *sql.Row) (*Job, bool) {
+	var j Job
+	var status string
+	var startedAt, doneAt, lastHeartbeat sql.NullTime
+	var depsJSON string
+
+	err := row.Scan(
+		&j.ID, &j.Command, &status, &j.CreatedAt,
+		&startedAt, &doneAt, &lastHeartbeat,
+		&j.MaxRetries, &j.Attempts, &depsJSON,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false
+	}
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: scan job: %v", err))
+	}
+
+	j.Status = JobStatus(status)
+	if startedAt.Valid {
+		j.StartedAt = &startedAt.Time
+	}
+	if doneAt.Valid {
+		j.DoneAt = &doneAt.Time
+	}
+	if lastHeartbeat.Valid {
+		j.LastHeartbeat = &lastHeartbeat.Time
+	}
+	if err := json.Unmarshal([]byte(depsJSON), &j.DependsOn); err != nil {
+		panic(fmt.Sprintf("sqlite: unmarshal depends_on: %v", err))
+	}
+
+	return &j, true
+}
+
 // queryJobs runs a SELECT query and scans all result rows into Jobs.
 func (s *SQLiteStore) queryJobs(query string, args ...any) []*Job {
 	rows, err := s.db.Query(query, args...)
@@ -206,11 +224,12 @@ func (s *SQLiteStore) queryJobs(query string, args ...any) []*Job {
 		var j Job
 		var status string
 		var startedAt, doneAt, lastHeartbeat sql.NullTime
+		var depsJSON string
 
 		if err := rows.Scan(
 			&j.ID, &j.Command, &status, &j.CreatedAt,
 			&startedAt, &doneAt, &lastHeartbeat,
-			&j.MaxRetries, &j.Attempts,
+			&j.MaxRetries, &j.Attempts, &depsJSON,
 		); err != nil {
 			panic(fmt.Sprintf("sqlite: scan job row: %v", err))
 		}
@@ -224,6 +243,9 @@ func (s *SQLiteStore) queryJobs(query string, args ...any) []*Job {
 		}
 		if lastHeartbeat.Valid {
 			j.LastHeartbeat = &lastHeartbeat.Time
+		}
+		if err := json.Unmarshal([]byte(depsJSON), &j.DependsOn); err != nil {
+			panic(fmt.Sprintf("sqlite: unmarshal depends_on: %v", err))
 		}
 		jobs = append(jobs, &j)
 	}

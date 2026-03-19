@@ -16,7 +16,7 @@ func testAddJobReturnsID(t *testing.T, factory StoreFactory) {
 	t.Helper()
 	s := factory(t)
 
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 
 	if id == "" {
 		t.Fatal("AddJob returned empty ID")
@@ -27,8 +27,8 @@ func testAddJobUniqueIDs(t *testing.T, factory StoreFactory) {
 	t.Helper()
 	s := factory(t)
 
-	id1 := s.AddJob("echo a")
-	id2 := s.AddJob("echo b")
+	id1 := s.AddJob("echo a", nil)
+	id2 := s.AddJob("echo b", nil)
 
 	if id1 == id2 {
 		t.Errorf("AddJob returned duplicate IDs: %s", id1)
@@ -40,7 +40,7 @@ func testGetJobRoundTrip(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	before := time.Now()
 
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 	job, found := s.GetJob(id)
 
 	if !found {
@@ -93,7 +93,7 @@ func testGetJobReturnsACopy(t *testing.T, factory StoreFactory) {
 	t.Helper()
 	s := factory(t)
 
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 
 	job1, _ := s.GetJob(id)
 	job2, _ := s.GetJob(id)
@@ -112,7 +112,7 @@ func testClaimJobReturnsJob(t *testing.T, factory StoreFactory) {
 	t.Helper()
 	s := factory(t)
 
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 	before := time.Now()
 
 	job, ok := s.ClaimJob()
@@ -156,7 +156,7 @@ func testClaimJobSkipsNonPending(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 
 	// Add one job and claim it, now it's running.
-	s.AddJob("echo hello")
+	s.AddJob("echo hello", nil)
 	s.ClaimJob()
 
 	// Second claim should find nothing.
@@ -166,13 +166,14 @@ func testClaimJobSkipsNonPending(t *testing.T, factory StoreFactory) {
 		t.Errorf("expected no job, got %+v", job)
 	}
 }
+
 func testClaimJobNoDuplicates(t *testing.T, factory StoreFactory) {
 	t.Helper()
 	s := factory(t)
 
 	// Add 5 jobs.
 	for i := 0; i < 5; i++ {
-		s.AddJob("echo hello")
+		s.AddJob("echo hello", nil)
 	}
 
 	// Claim all 5 from concurrent goroutines.
@@ -209,7 +210,7 @@ func testUpdateJobStatusDone(t *testing.T, factory StoreFactory) {
 	t.Helper()
 	s := factory(t)
 
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 	s.ClaimJob()
 	before := time.Now()
 
@@ -228,7 +229,7 @@ func testUpdateJobStatusFailed(t *testing.T, factory StoreFactory) {
 	t.Helper()
 	s := factory(t)
 
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 	s.ClaimJob()
 	before := time.Now()
 
@@ -247,7 +248,7 @@ func testUpdateJobStatusRequeue(t *testing.T, factory StoreFactory) {
 	t.Helper()
 	s := factory(t)
 
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 	s.ClaimJob()
 
 	// Re-queue: set back to pending (retry scenario).
@@ -282,9 +283,9 @@ func testListJobsReturnsAll(t *testing.T, factory StoreFactory) {
 	t.Helper()
 	s := factory(t)
 
-	s.AddJob("echo a")
-	s.AddJob("echo b")
-	s.AddJob("echo c")
+	s.AddJob("echo a", nil)
+	s.AddJob("echo b", nil)
+	s.AddJob("echo c", nil)
 
 	jobs := s.ListJobs()
 
@@ -299,7 +300,7 @@ func testListRunningJobsEmpty(t *testing.T, factory StoreFactory) {
 	t.Helper()
 	s := factory(t)
 
-	s.AddJob("echo pending")
+	s.AddJob("echo pending", nil)
 
 	jobs := s.ListRunningJobs()
 
@@ -312,9 +313,9 @@ func testListRunningJobsFilters(t *testing.T, factory StoreFactory) {
 	t.Helper()
 	s := factory(t)
 
-	s.AddJob("echo a")
-	s.AddJob("echo b")
-	s.AddJob("echo c")
+	s.AddJob("echo a", nil)
+	s.AddJob("echo b", nil)
+	s.AddJob("echo c", nil)
 	// Claim 2, they become running.
 	s.ClaimJob()
 	s.ClaimJob()
@@ -337,7 +338,7 @@ func testUpdateHeartbeat(t *testing.T, factory StoreFactory) {
 	t.Helper()
 	s := factory(t)
 
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 	s.ClaimJob()
 	before := time.Now()
 
@@ -349,5 +350,80 @@ func testUpdateHeartbeat(t *testing.T, factory StoreFactory) {
 	}
 	if job.LastHeartbeat.Before(before) {
 		t.Errorf("LastHeartbeat %v is before call time %v", job.LastHeartbeat, before)
+	}
+}
+
+// --- Compliance tests: DependsOn ---
+
+func testAddJobNoDependencies(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+
+	id := s.AddJob("echo hello", nil)
+
+	job, _ := s.GetJob(id)
+	if job.Status != StatusPending {
+		t.Errorf("Status = %q, want %q for job without dependencies", job.Status, StatusPending)
+	}
+}
+
+func testAddJobWithDependenciesStartsBlocked(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+
+	depID := s.AddJob("echo dep", nil)
+	id := s.AddJob("echo child", []string{depID})
+
+	job, _ := s.GetJob(id)
+	if job.Status != StatusBlocked {
+		t.Errorf("Status = %q, want %q for job with dependencies", job.Status, StatusBlocked)
+	}
+	if len(job.DependsOn) != 1 || job.DependsOn[0] != depID {
+		t.Errorf("DependsOn = %v, want [%s]", job.DependsOn, depID)
+	}
+}
+
+func testClaimJobSkipsBlocked(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+
+	depID := s.AddJob("echo dep", nil)
+	s.AddJob("echo child", []string{depID})
+
+	// Claim should only return the dependency, not the blocked child.
+	job, ok := s.ClaimJob()
+	if !ok {
+		t.Fatal("expected to claim a job")
+	}
+	if job.ID != depID {
+		t.Errorf("claimed %q, want %q (the pending job, not the blocked one)", job.ID, depID)
+	}
+
+	// The second claim should find nothing, one pending is now running, one is blocked
+	_, ok = s.ClaimJob()
+	if ok {
+		t.Error("expected no claimable job, but got one")
+	}
+}
+
+func testDependsOnRoundTrip(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+
+	dep1 := s.AddJob("echo a", nil)
+	dep2 := s.AddJob("echo b", nil)
+	id := s.AddJob("echo c", []string{dep1, dep2})
+
+	job, _ := s.GetJob(id)
+	if len(job.DependsOn) != 2 {
+		t.Fatalf("DependsOn length = %d, want 2", len(job.DependsOn))
+	}
+
+	deps := make(map[string]bool)
+	for _, d := range job.DependsOn {
+		deps[d] = true
+	}
+	if !deps[dep1] || !deps[dep2] {
+		t.Errorf("DependsOn = %v, want [%s, %s]", job.DependsOn, dep1, dep2)
 	}
 }

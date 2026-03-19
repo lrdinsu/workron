@@ -77,11 +77,27 @@ func TestMemory_UpdateHeartbeat(t *testing.T) {
 	testUpdateHeartbeat(t, newTestMemoryStore)
 }
 
+func TestMemory_AddJobNoDependencies(t *testing.T) {
+	testAddJobNoDependencies(t, newTestMemoryStore)
+}
+
+func TestMemory_AddJobWithDependenciesStartsBlocked(t *testing.T) {
+	testAddJobWithDependenciesStartsBlocked(t, newTestMemoryStore)
+}
+
+func TestMemory_ClaimJobSkipsBlocked(t *testing.T) {
+	testClaimJobSkipsBlocked(t, newTestMemoryStore)
+}
+
+func TestMemory_DependsOnRoundTrip(t *testing.T) {
+	testDependsOnRoundTrip(t, newTestMemoryStore)
+}
+
 func TestMemoryStore_AddAndClaimJob(t *testing.T) {
 	store := NewMemoryStore()
 
 	// Test adding a Job
-	id := store.AddJob("echo test")
+	id := store.AddJob("echo test", nil)
 	if id == "" {
 		t.Fatalf("Expected a valid ID, got an empty string")
 	}
@@ -111,9 +127,9 @@ func TestMemoryStore_AddAndClaimJob(t *testing.T) {
 func TestMemoryStore_ListRunningJobs(t *testing.T) {
 	s := NewMemoryStore()
 	// All pending
-	s.AddJob("echo one")
-	s.AddJob("echo two")
-	s.AddJob("echo three")
+	s.AddJob("echo one", nil)
+	s.AddJob("echo two", nil)
+	s.AddJob("echo three", nil)
 
 	// One and two become running
 	s.ClaimJob()

@@ -10,7 +10,7 @@ import (
 
 func TestReap_RequeuesStaleJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 	s.ClaimJob() // attempt 1 of 3, status = running
 
 	s.SetLastHeartbeat(id, time.Now().Add(-60*time.Second))
@@ -25,7 +25,7 @@ func TestReap_RequeuesStaleJob(t *testing.T) {
 
 func TestReap_FailsJobWithExhaustedRetries(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("bad command")
+	id := s.AddJob("bad command", nil)
 
 	// Exhaust all 3 retries
 	for i := 0; i < 3; i++ {
@@ -47,7 +47,7 @@ func TestReap_FailsJobWithExhaustedRetries(t *testing.T) {
 
 func TestReap_IgnoresHealthyJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 	s.ClaimJob()
 	s.UpdateHeartbeat(id) // fresh heartbeat
 
@@ -61,8 +61,8 @@ func TestReap_IgnoresHealthyJob(t *testing.T) {
 
 func TestReap_IgnoresPendingAndDoneJobs(t *testing.T) {
 	s := store.NewMemoryStore()
-	id1 := s.AddJob("echo one")
-	id2 := s.AddJob("echo two")
+	id1 := s.AddJob("echo one", nil)
+	id2 := s.AddJob("echo two", nil)
 
 	// Claim both, then mark both as done
 	s.ClaimJob()
@@ -83,7 +83,7 @@ func TestReap_IgnoresPendingAndDoneJobs(t *testing.T) {
 
 func TestReap_RequeuesJobWithNilHeartbeat(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 	s.ClaimJob() // running, no heartbeat, but StartedAt is now
 
 	// With a fresh StartedAt, reaper should leave it alone
@@ -117,7 +117,7 @@ func TestStartReaper_StopsOnContextCancel(t *testing.T) {
 
 func TestReap_RequeuesJobWithNilHeartbeatAndStaleStart(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 	s.ClaimJob()
 
 	// Simulate a job that was claimed 60 seconds ago but never sent a heartbeat
