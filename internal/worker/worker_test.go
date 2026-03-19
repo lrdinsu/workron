@@ -31,7 +31,7 @@ func waitForStatus(t *testing.T, s *store.MemoryStore, id string, expected store
 
 func TestWorker_ProcessesJobSuccessfully(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -44,7 +44,7 @@ func TestWorker_ProcessesJobSuccessfully(t *testing.T) {
 
 func TestWorker_MarksFailedJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("thiscommanddoesnotexist")
+	id := s.AddJob("thiscommanddoesnotexist", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -58,7 +58,7 @@ func TestWorker_MarksFailedJob(t *testing.T) {
 
 func TestWorker_RetriesFailedJobBeforeGivingUp(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("thiscommanddoesnotexist")
+	id := s.AddJob("thiscommanddoesnotexist", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -83,7 +83,7 @@ func TestWorker_DoesNotRetryJobThatSucceeds(t *testing.T) {
 	s := store.NewMemoryStore()
 	// This command should succeed on the first attempt, so the worker
 	// should not requeue or retry it.
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -133,7 +133,7 @@ func TestWorker_MultipleWorkerNoDuplicates(t *testing.T) {
 	// Submit 5 jobs
 	ids := make([]string, 5)
 	for i := range ids {
-		ids[i] = s.AddJob("echo hello")
+		ids[i] = s.AddJob("echo hello", nil)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -171,7 +171,7 @@ func TestWorker_MultipleWorkerNoDuplicates(t *testing.T) {
 
 func TestWorker_SendsHeartbeatsDuringLongJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("sleep 12")
+	id := s.AddJob("sleep 12", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -200,7 +200,7 @@ func TestWorker_SendsHeartbeatsDuringLongJob(t *testing.T) {
 
 func TestWorker_HeartbeatStopsAfterJobCompletes(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello") // finishes instantly
+	id := s.AddJob("echo hello", nil) // finishes instantly
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
