@@ -7,7 +7,7 @@ import (
 
 // JobStore defines the behavior any storage backend must have
 type JobStore interface {
-	AddJob(command string) string
+	AddJob(command string, dependsOn []string) string
 	ClaimJob() (*Job, bool)
 	GetJob(id string) (*Job, bool)
 	ListJobs() []*Job
@@ -22,6 +22,7 @@ type JobStatus string
 
 const (
 	StatusPending JobStatus = "pending"
+	StatusBlocked JobStatus = "blocked"
 	StatusRunning JobStatus = "running"
 	StatusDone    JobStatus = "done"
 	StatusFailed  JobStatus = "failed"
@@ -38,6 +39,7 @@ type Job struct {
 	LastHeartbeat *time.Time `json:"last_heart_beat,omitempty"`
 	MaxRetries    int        `json:"max_retries"`
 	Attempts      int        `json:"attempts"`
+	DependsOn     []string   `json:"depends_on,omitempty"`
 }
 
 // Generate a unique ID using UnixNano

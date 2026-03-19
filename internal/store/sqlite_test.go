@@ -85,6 +85,22 @@ func TestSQLite_UpdateHeartbeat(t *testing.T) {
 	testUpdateHeartbeat(t, newTestSQLiteStore)
 }
 
+func TestSQLite_AddJobNoDependencies(t *testing.T) {
+	testAddJobNoDependencies(t, newTestSQLiteStore)
+}
+
+func TestSQLite_AddJobWithDependenciesStartsBlocked(t *testing.T) {
+	testAddJobWithDependenciesStartsBlocked(t, newTestSQLiteStore)
+}
+
+func TestSQLite_ClaimJobSkipsBlocked(t *testing.T) {
+	testClaimJobSkipsBlocked(t, newTestSQLiteStore)
+}
+
+func TestSQLite_DependsOnRoundTrip(t *testing.T) {
+	testDependsOnRoundTrip(t, newTestSQLiteStore)
+}
+
 // --- SQLite-specific tests ---
 
 func TestSQLite_PersistenceAcrossReopen(t *testing.T) {
@@ -95,7 +111,7 @@ func TestSQLite_PersistenceAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := s1.AddJob("echo persist")
+	id := s1.AddJob("echo persist", nil)
 	_ = s1.Close()
 
 	// Reopen the same file.
@@ -114,5 +130,34 @@ func TestSQLite_PersistenceAcrossReopen(t *testing.T) {
 	}
 	if job.Status != StatusPending {
 		t.Errorf("Status = %q, want %q", job.Status, StatusPending)
+	}
+}
+
+func TestSQLite_PersistenceDependsOnSurvivesReopen(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	s1, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	depID := s1.AddJob("echo dep", nil)
+	childID := s1.AddJob("echo child", []string{depID})
+	_ = s1.Close()
+
+	s2, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	job, found := s2.GetJob(childID)
+	if !found {
+		t.Fatal("child job not found after reopening database")
+	}
+	if job.Status != StatusBlocked {
+		t.Errorf("Status = %q, want %q", job.Status, StatusBlocked)
+	}
+	if len(job.DependsOn) != 1 || job.DependsOn[0] != depID {
+		t.Errorf("DependsOn = %v, want [%s]", job.DependsOn, depID)
 	}
 }
