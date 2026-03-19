@@ -73,7 +73,7 @@ func TestHandleSubmitJob_InvalidJSON(t *testing.T) {
 
 func TestHandleGetJob_Found(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 	srv := NewServer(s)
 
 	r := httptest.NewRequest(http.MethodGet, "/jobs/"+id, nil)
@@ -132,8 +132,8 @@ func TestHandleListJobs_Empty(t *testing.T) {
 
 func TestHandleListJobs_WithJobs(t *testing.T) {
 	s := store.NewMemoryStore()
-	s.AddJob("echo hello")
-	s.AddJob("echo world")
+	s.AddJob("echo hello", nil)
+	s.AddJob("echo world", nil)
 	srv := NewServer(s)
 
 	r := httptest.NewRequest(http.MethodGet, "/jobs", nil)
@@ -157,7 +157,7 @@ func TestHandleListJobs_WithJobs(t *testing.T) {
 
 func TestHandleClaimJob_ReturnsJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 	srv := NewServer(s)
 
 	r := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
@@ -198,7 +198,7 @@ func TestHandleClaimJob_NoJobs(t *testing.T) {
 
 func TestHandleClaimJob_SkipsRunningJobs(t *testing.T) {
 	s := store.NewMemoryStore()
-	s.AddJob("echo first")
+	s.AddJob("echo first", nil)
 	srv := NewServer(s)
 
 	// Claim the only job
@@ -222,7 +222,7 @@ func TestHandleClaimJob_SkipsRunningJobs(t *testing.T) {
 
 func TestHandleJobDone_Success(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 
 	// Claim the job first so it's in running state
 	s.ClaimJob()
@@ -257,7 +257,7 @@ func TestHandleJobDone_NotFound(t *testing.T) {
 
 func TestHandleJobDone_NotRunning(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello") // status is pending, not running
+	id := s.AddJob("echo hello", nil) // status is pending, not running
 	srv := NewServer(s)
 
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/done", nil)
@@ -272,7 +272,7 @@ func TestHandleJobDone_NotRunning(t *testing.T) {
 
 func TestHandleJobFail_RetriesJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("bad command")
+	id := s.AddJob("bad command", nil)
 
 	// Claim it (attempt 1 of 3)
 	s.ClaimJob()
@@ -295,7 +295,7 @@ func TestHandleJobFail_RetriesJob(t *testing.T) {
 
 func TestHandleJobFail_PermanentFailure(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("bad command")
+	id := s.AddJob("bad command", nil)
 
 	// Exhaust all retries by claiming 3 times
 	for i := 0; i < 3; i++ {
@@ -326,7 +326,7 @@ func TestHandleJobFail_PermanentFailure(t *testing.T) {
 
 func TestHandleHeartbeat_Success(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello")
+	id := s.AddJob("echo hello", nil)
 	s.ClaimJob() // move to running
 
 	srv := NewServer(s)
@@ -359,7 +359,7 @@ func TestHandleHeartbeat_NotFound(t *testing.T) {
 
 func TestHandleHeartbeat_NotRunning(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello") // status is pending, not running
+	id := s.AddJob("echo hello", nil) // status is pending, not running
 	srv := NewServer(s)
 
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/heartbeat", nil)

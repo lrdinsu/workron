@@ -60,7 +60,7 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := s.store.AddJob(req.Command)
+	id := s.store.AddJob(req.Command, nil)
 	job, _ := s.store.GetJob(id)
 
 	log.Printf("[server] job %s submitted: %q", id, req.Command)
