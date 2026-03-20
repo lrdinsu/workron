@@ -15,6 +15,7 @@ type JobStore interface {
 	UpdateJobStatus(id string, status JobStatus)
 	UpdateHeartbeat(id string)
 	SendHeartbeat(id string) error
+	UnblockReady()
 }
 
 // JobStatus defines the valid states for a job

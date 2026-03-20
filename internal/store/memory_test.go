@@ -93,6 +93,26 @@ func TestMemory_DependsOnRoundTrip(t *testing.T) {
 	testDependsOnRoundTrip(t, newTestMemoryStore)
 }
 
+func TestMemory_UnblockReadyAfterAllDepsDone(t *testing.T) {
+	testUnblockReadyAfterAllDepsDone(t, newTestMemoryStore)
+}
+
+func TestMemory_UnblockReadyPartialDeps(t *testing.T) {
+	testUnblockReadyPartialDeps(t, newTestMemoryStore)
+}
+
+func TestMemory_UnblockReadyChain(t *testing.T) {
+	testUnblockReadyChain(t, newTestMemoryStore)
+}
+
+func TestMemory_UnblockReadyIgnoresNonBlocked(t *testing.T) {
+	testUnblockReadyIgnoresNonBlocked(t, newTestMemoryStore)
+}
+
+func TestMemory_UnblockReadyFullPipeline(t *testing.T) {
+	testUnblockReadyFullPipeline(t, newTestMemoryStore)
+}
+
 func TestMemoryStore_AddAndClaimJob(t *testing.T) {
 	store := NewMemoryStore()
 

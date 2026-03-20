@@ -427,3 +427,150 @@ func testDependsOnRoundTrip(t *testing.T, factory StoreFactory) {
 		t.Errorf("DependsOn = %v, want [%s, %s]", job.DependsOn, dep1, dep2)
 	}
 }
+
+// --- Compliance tests: UnblockReady ---
+
+func testUnblockReadyAfterAllDepsDone(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+
+	depID := s.AddJob("echo dep", nil)
+	childID := s.AddJob("echo child", []string{depID})
+
+	// Child should be blocked.
+	child, _ := s.GetJob(childID)
+	if child.Status != StatusBlocked {
+		t.Fatalf("expected blocked, got %s", child.Status)
+	}
+
+	// Complete the dependency.
+	s.ClaimJob()
+	s.UpdateJobStatus(depID, StatusDone)
+	s.UnblockReady()
+
+	// Child should now be pending.
+	child, _ = s.GetJob(childID)
+	if child.Status != StatusPending {
+		t.Errorf("Status = %q, want %q after dependency completed", child.Status, StatusPending)
+	}
+}
+
+func testUnblockReadyPartialDeps(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+
+	dep1 := s.AddJob("echo a", nil)
+	dep2 := s.AddJob("echo b", nil)
+	childID := s.AddJob("echo child", []string{dep1, dep2})
+
+	// Complete only the first dependency.
+	s.ClaimJob()
+	s.UpdateJobStatus(dep1, StatusDone)
+	s.UnblockReady()
+
+	// Child should stay blocked, dep2 is still pending.
+	child, _ := s.GetJob(childID)
+	if child.Status != StatusBlocked {
+		t.Errorf("Status = %q, want %q (not all deps done)", child.Status, StatusBlocked)
+	}
+
+	// Now complete the second dependency.
+	s.ClaimJob()
+	s.UpdateJobStatus(dep2, StatusDone)
+	s.UnblockReady()
+
+	// Now child should be pending.
+	child, _ = s.GetJob(childID)
+	if child.Status != StatusPending {
+		t.Errorf("Status = %q, want %q after all deps done", child.Status, StatusPending)
+	}
+}
+
+func testUnblockReadyChain(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+
+	// A <- B <- C (linear chain)
+	idA := s.AddJob("echo a", nil)
+	idB := s.AddJob("echo b", []string{idA})
+	idC := s.AddJob("echo c", []string{idB})
+
+	// Complete A -> B unblocks, C stays blocked.
+	s.ClaimJob()
+	s.UpdateJobStatus(idA, StatusDone)
+	s.UnblockReady()
+
+	b, _ := s.GetJob(idB)
+	c, _ := s.GetJob(idC)
+	if b.Status != StatusPending {
+		t.Errorf("B status = %q, want pending", b.Status)
+	}
+	if c.Status != StatusBlocked {
+		t.Errorf("C status = %q, want blocked (B not done yet)", c.Status)
+	}
+
+	// Complete B -> C unblocks.
+	s.ClaimJob()
+	s.UpdateJobStatus(idB, StatusDone)
+	s.UnblockReady()
+
+	c, _ = s.GetJob(idC)
+	if c.Status != StatusPending {
+		t.Errorf("C status = %q, want pending after B done", c.Status)
+	}
+}
+
+func testUnblockReadyIgnoresNonBlocked(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+
+	id := s.AddJob("echo hello", nil)
+	s.ClaimJob()
+
+	// Job is running. UnblockReady should not touch it.
+	s.UnblockReady()
+
+	job, _ := s.GetJob(id)
+	if job.Status != StatusRunning {
+		t.Errorf("Status = %q, want running (UnblockReady should not touch non-blocked jobs)", job.Status)
+	}
+}
+
+func testUnblockReadyFullPipeline(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+
+	// Submit a diamond DAG: A, B depend on nothing; C depends on A and B.
+	idA := s.AddJob("echo a", nil)
+	idB := s.AddJob("echo b", nil)
+	idC := s.AddJob("echo c", []string{idA, idB})
+
+	// Claim and complete A.
+	s.ClaimJob()
+	s.UpdateJobStatus(idA, StatusDone)
+	s.UnblockReady()
+
+	c, _ := s.GetJob(idC)
+	if c.Status != StatusBlocked {
+		t.Errorf("C should still be blocked, got %s", c.Status)
+	}
+
+	// Claim and complete B.
+	s.ClaimJob()
+	s.UpdateJobStatus(idB, StatusDone)
+	s.UnblockReady()
+
+	c, _ = s.GetJob(idC)
+	if c.Status != StatusPending {
+		t.Errorf("C should be pending now, got %s", c.Status)
+	}
+
+	// C should now be claimable.
+	job, ok := s.ClaimJob()
+	if !ok {
+		t.Fatal("expected to claim C")
+	}
+	if job.ID != idC {
+		t.Errorf("claimed %q, want %q", job.ID, idC)
+	}
+}

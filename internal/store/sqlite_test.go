@@ -101,6 +101,26 @@ func TestSQLite_DependsOnRoundTrip(t *testing.T) {
 	testDependsOnRoundTrip(t, newTestSQLiteStore)
 }
 
+func TestSQLite_UnblockReadyAfterAllDepsDone(t *testing.T) {
+	testUnblockReadyAfterAllDepsDone(t, newTestSQLiteStore)
+}
+
+func TestSQLite_UnblockReadyPartialDeps(t *testing.T) {
+	testUnblockReadyPartialDeps(t, newTestSQLiteStore)
+}
+
+func TestSQLite_UnblockReadyChain(t *testing.T) {
+	testUnblockReadyChain(t, newTestSQLiteStore)
+}
+
+func TestSQLite_UnblockReadyIgnoresNonBlocked(t *testing.T) {
+	testUnblockReadyIgnoresNonBlocked(t, newTestSQLiteStore)
+}
+
+func TestSQLite_UnblockReadyFullPipeline(t *testing.T) {
+	testUnblockReadyFullPipeline(t, newTestSQLiteStore)
+}
+
 // --- SQLite-specific tests ---
 
 func TestSQLite_PersistenceAcrossReopen(t *testing.T) {
