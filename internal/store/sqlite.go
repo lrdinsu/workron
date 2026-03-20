@@ -171,6 +171,22 @@ func (s *SQLiteStore) SendHeartbeat(id string) error {
 	return nil
 }
 
+// UnblockReady transitions blocked jobs to pending when all their
+// dependencies have completed. Uses json_each to check each element
+// of the depends_on JSON array against the jobs table.
+func (s *SQLiteStore) UnblockReady() {
+	_, err := s.db.Exec(`
+		UPDATE jobs SET status = 'pending'
+		WHERE status = 'blocked'
+		AND NOT EXISTS (
+			SELECT 1 FROM json_each(jobs.depends_on) AS dep
+			WHERE dep.value NOT IN (SELECT id FROM jobs WHERE status = 'done')
+		)`)
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: unblock ready: %v", err))
+	}
+}
+
 // --- Scan helpers ---
 
 // scanJob scans a single database row into a Job.

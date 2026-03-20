@@ -142,6 +142,33 @@ func (s *MemoryStore) SendHeartbeat(id string) error {
 	return nil
 }
 
+// UnblockReady transitions blocked jobs to pending when all their
+// dependencies have completed. A job is unblocked only if every ID
+// in its DependsOn list has status done.
+func (s *MemoryStore) UnblockReady() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, job := range s.jobs {
+		if job.Status != StatusBlocked {
+			continue
+		}
+
+		ready := true
+		for _, depID := range job.DependsOn {
+			dep, exists := s.jobs[depID]
+			if !exists || dep.Status != StatusDone {
+				ready = false
+				break
+			}
+		}
+
+		if ready {
+			job.Status = StatusPending
+		}
+	}
+}
+
 // SetLastHeartbeat sets the heartbeat to a specific time. Used for testing the reaper.
 func (s *MemoryStore) SetLastHeartbeat(id string, t time.Time) {
 	s.mu.Lock()
