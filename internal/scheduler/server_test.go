@@ -54,7 +54,6 @@ func TestHandleSubmitJob_EmptyCommand(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected status 400, got %d", w.Code)
 	}
-
 }
 
 func TestHandleSubmitJob_InvalidJSON(t *testing.T) {
@@ -369,5 +368,235 @@ func TestHandleHeartbeat_NotRunning(t *testing.T) {
 
 	if w.Code != http.StatusConflict {
 		t.Errorf("expected status 409, got %d", w.Code)
+	}
+}
+
+// --- DAG dependency tests ---
+
+func TestHandleSubmitJob_WithDependencies(t *testing.T) {
+	s := store.NewMemoryStore()
+	depID := s.AddJob("echo dep", nil)
+	srv := NewServer(s)
+
+	body := bytes.NewBufferString(`{"command": "echo child", "depends_on": ["` + depID + `"]}`)
+	r := httptest.NewRequest(http.MethodPost, "/jobs", body)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status 201, got %d", w.Code)
+	}
+
+	var job store.Job
+	if err := json.NewDecoder(w.Body).Decode(&job); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if job.Status != store.StatusBlocked {
+		t.Errorf("expected status blocked, got %s", job.Status)
+	}
+	if len(job.DependsOn) != 1 || job.DependsOn[0] != depID {
+		t.Errorf("DependsOn = %v, want [%s]", job.DependsOn, depID)
+	}
+}
+
+func TestHandleSubmitJob_NoDependencies_BackwardCompatible(t *testing.T) {
+	srv := newTestServer()
+
+	body := bytes.NewBufferString(`{"command": "echo hello"}`)
+	r := httptest.NewRequest(http.MethodPost, "/jobs", body)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status 201, got %d", w.Code)
+	}
+
+	var job store.Job
+	if err := json.NewDecoder(w.Body).Decode(&job); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if job.Status != store.StatusPending {
+		t.Errorf("expected status pending, got %s", job.Status)
+	}
+}
+
+func TestHandleSubmitJob_NonexistentDependency(t *testing.T) {
+	srv := newTestServer()
+
+	body := bytes.NewBufferString(`{"command": "echo child", "depends_on": ["nonexistent"]}`)
+	r := httptest.NewRequest(http.MethodPost, "/jobs", body)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400, got %d", w.Code)
+	}
+}
+
+func TestHandleJobDone_UnblocksDownstream(t *testing.T) {
+	s := store.NewMemoryStore()
+	depID := s.AddJob("echo dep", nil)
+	childID := s.AddJob("echo child", []string{depID})
+	srv := NewServer(s)
+
+	// Claim and complete the dependency via HTTP.
+	claimReq := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
+	claimW := httptest.NewRecorder()
+	srv.ServeHTTP(claimW, claimReq)
+
+	if claimW.Code != http.StatusOK {
+		t.Fatalf("claim expected 200, got %d", claimW.Code)
+	}
+
+	doneReq := httptest.NewRequest(http.MethodPost, "/jobs/"+depID+"/done", nil)
+	doneW := httptest.NewRecorder()
+	srv.ServeHTTP(doneW, doneReq)
+
+	if doneW.Code != http.StatusOK {
+		t.Fatalf("done expected 200, got %d", doneW.Code)
+	}
+
+	// Child should now be pending.
+	child, _ := s.GetJob(childID)
+	if child.Status != store.StatusPending {
+		t.Errorf("expected child status pending after dep completed, got %s", child.Status)
+	}
+
+	// Child should be claimable.
+	claimReq2 := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
+	claimW2 := httptest.NewRecorder()
+	srv.ServeHTTP(claimW2, claimReq2)
+
+	if claimW2.Code != http.StatusOK {
+		t.Errorf("expected to claim child, got %d", claimW2.Code)
+	}
+
+	var claimed store.Job
+	if err := json.NewDecoder(claimW2.Body).Decode(&claimed); err != nil {
+		t.Fatalf("failed to decode claimed job: %v", err)
+	}
+	if claimed.ID != childID {
+		t.Errorf("claimed %q, want %q", claimed.ID, childID)
+	}
+}
+
+func TestHandleJobDone_DoesNotUnblockPartialDeps(t *testing.T) {
+	s := store.NewMemoryStore()
+	dep1 := s.AddJob("echo a", nil)
+	dep2 := s.AddJob("echo b", nil)
+	childID := s.AddJob("echo child", []string{dep1, dep2})
+	srv := NewServer(s)
+
+	// Claim and complete only dep1.
+	s.ClaimJob()
+	doneReq := httptest.NewRequest(http.MethodPost, "/jobs/"+dep1+"/done", nil)
+	doneW := httptest.NewRecorder()
+	srv.ServeHTTP(doneW, doneReq)
+
+	// Child should still be blocked.
+	child, _ := s.GetJob(childID)
+	if child.Status != store.StatusBlocked {
+		t.Errorf("expected child status blocked (dep2 not done), got %s", child.Status)
+	}
+}
+
+func TestHandlePipeline_EndToEnd(t *testing.T) {
+	s := store.NewMemoryStore()
+	srv := NewServer(s)
+
+	// Submit step1 via HTTP.
+	body1 := bytes.NewBufferString(`{"command": "echo step1"}`)
+	r1 := httptest.NewRequest(http.MethodPost, "/jobs", body1)
+	w1 := httptest.NewRecorder()
+	srv.ServeHTTP(w1, r1)
+
+	var step1 store.Job
+	json.NewDecoder(w1.Body).Decode(&step1)
+
+	// Submit step2 depending on step1.
+	body2 := bytes.NewBufferString(`{"command": "echo step2", "depends_on": ["` + step1.ID + `"]}`)
+	r2 := httptest.NewRequest(http.MethodPost, "/jobs", body2)
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, r2)
+
+	var step2 store.Job
+	json.NewDecoder(w2.Body).Decode(&step2)
+
+	if step2.Status != store.StatusBlocked {
+		t.Fatalf("step2 expected blocked, got %s", step2.Status)
+	}
+
+	// Submit step3 depending on step2.
+	body3 := bytes.NewBufferString(`{"command": "echo step3", "depends_on": ["` + step2.ID + `"]}`)
+	r3 := httptest.NewRequest(http.MethodPost, "/jobs", body3)
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, r3)
+
+	var step3 store.Job
+	json.NewDecoder(w3.Body).Decode(&step3)
+
+	if step3.Status != store.StatusBlocked {
+		t.Fatalf("step3 expected blocked, got %s", step3.Status)
+	}
+
+	// Only step1 should be claimable.
+	claimReq := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
+	claimW := httptest.NewRecorder()
+	srv.ServeHTTP(claimW, claimReq)
+
+	var claimed store.Job
+	json.NewDecoder(claimW.Body).Decode(&claimed)
+	if claimed.ID != step1.ID {
+		t.Fatalf("expected to claim step1, got %s", claimed.ID)
+	}
+
+	// Complete step1 -> step2 should unblock.
+	doneReq := httptest.NewRequest(http.MethodPost, "/jobs/"+step1.ID+"/done", nil)
+	doneW := httptest.NewRecorder()
+	srv.ServeHTTP(doneW, doneReq)
+
+	s2, _ := s.GetJob(step2.ID)
+	s3, _ := s.GetJob(step3.ID)
+	if s2.Status != store.StatusPending {
+		t.Errorf("step2 expected pending, got %s", s2.Status)
+	}
+	if s3.Status != store.StatusBlocked {
+		t.Errorf("step3 expected still blocked, got %s", s3.Status)
+	}
+
+	// Claim and complete step2 -> step3 should unblock.
+	claimReq2 := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
+	claimW2 := httptest.NewRecorder()
+	srv.ServeHTTP(claimW2, claimReq2)
+
+	doneReq2 := httptest.NewRequest(http.MethodPost, "/jobs/"+step2.ID+"/done", nil)
+	doneW2 := httptest.NewRecorder()
+	srv.ServeHTTP(doneW2, doneReq2)
+
+	s3, _ = s.GetJob(step3.ID)
+	if s3.Status != store.StatusPending {
+		t.Errorf("step3 expected pending after step2 done, got %s", s3.Status)
+	}
+
+	// Claim and complete step3.
+	claimReq3 := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
+	claimW3 := httptest.NewRecorder()
+	srv.ServeHTTP(claimW3, claimReq3)
+
+	doneReq3 := httptest.NewRequest(http.MethodPost, "/jobs/"+step3.ID+"/done", nil)
+	doneW3 := httptest.NewRecorder()
+	srv.ServeHTTP(doneW3, doneReq3)
+
+	// All three should be done.
+	for _, id := range []string{step1.ID, step2.ID, step3.ID} {
+		job, _ := s.GetJob(id)
+		if job.Status != store.StatusDone {
+			t.Errorf("job %s expected done, got %s", id, job.Status)
+		}
 	}
 }
