@@ -16,6 +16,8 @@ const (
 // StartReaper runs a background goroutine that detects dead workers.
 // It checks all running jobs for stale or missing heartbeats and either
 // re-queues them (if retries remain) or marks them permanently failed.
+// It also calls UnblockReady on each tick as a safety net for DAG
+// dependencies that may not have been unblocked through the HTTP handler.
 func StartReaper(ctx context.Context, s store.JobStore) {
 	ticker := time.NewTicker(reapInterval)
 	defer ticker.Stop()
@@ -29,6 +31,7 @@ func StartReaper(ctx context.Context, s store.JobStore) {
 			return
 		case <-ticker.C:
 			reap(s)
+			s.UnblockReady()
 		}
 	}
 }
