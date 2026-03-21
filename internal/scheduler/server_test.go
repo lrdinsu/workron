@@ -492,13 +492,20 @@ func TestHandleJobDone_DoesNotUnblockPartialDeps(t *testing.T) {
 	childID := s.AddJob("echo child", []string{dep1, dep2})
 	srv := NewServer(s)
 
-	// Claim and complete only dep1.
+	// Claim both so we can complete just one.
 	s.ClaimJob()
+	s.ClaimJob()
+
+	// Complete only dep1.
 	doneReq := httptest.NewRequest(http.MethodPost, "/jobs/"+dep1+"/done", nil)
 	doneW := httptest.NewRecorder()
 	srv.ServeHTTP(doneW, doneReq)
 
-	// Child should still be blocked.
+	if doneW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", doneW.Code)
+	}
+
+	// Child should still be blocked, dep2 is running, not done.
 	child, _ := s.GetJob(childID)
 	if child.Status != store.StatusBlocked {
 		t.Errorf("expected child status blocked (dep2 not done), got %s", child.Status)

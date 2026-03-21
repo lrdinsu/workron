@@ -399,7 +399,7 @@ func testClaimJobSkipsBlocked(t *testing.T, factory StoreFactory) {
 		t.Errorf("claimed %q, want %q (the pending job, not the blocked one)", job.ID, depID)
 	}
 
-	// The second claim should find nothing, one pending is now running, one is blocked
+	// The second claim should find nothing, one pending is now running, one is blocked.
 	_, ok = s.ClaimJob()
 	if ok {
 		t.Error("expected no claimable job, but got one")
@@ -545,8 +545,11 @@ func testUnblockReadyFullPipeline(t *testing.T, factory StoreFactory) {
 	idB := s.AddJob("echo b", nil)
 	idC := s.AddJob("echo c", []string{idA, idB})
 
-	// Claim and complete A.
+	// Claim both A and B so we can complete them independently.
 	s.ClaimJob()
+	s.ClaimJob()
+
+	// Complete A. C should still be blocked.
 	s.UpdateJobStatus(idA, StatusDone)
 	s.UnblockReady()
 
@@ -555,8 +558,7 @@ func testUnblockReadyFullPipeline(t *testing.T, factory StoreFactory) {
 		t.Errorf("C should still be blocked, got %s", c.Status)
 	}
 
-	// Claim and complete B.
-	s.ClaimJob()
+	// Complete B. C should now be pending.
 	s.UpdateJobStatus(idB, StatusDone)
 	s.UnblockReady()
 
