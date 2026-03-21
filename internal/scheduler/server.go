@@ -42,12 +42,14 @@ func (s *Server) registerRoutes() {
 
 // submitJobRequest is the expected JSON body for POST /jobs
 type submitJobRequest struct {
-	Command string `json:"command"`
+	Command   string   `json:"command"`
+	DependsOn []string `json:"depends_on,omitempty"`
 }
 
-// handleSubmitJob handles Post /jobs
-// Accepts: {"command": "echo hello"}
-// Returns: {"id": "job-123", "status": "pending"}
+// handleSubmitJob handles POST /jobs
+// Accepts: {"command": "echo hello", "depends_on": ["job-123"]}
+// Returns: the created job as JSON (201)
+// Returns 400 if command is empty, dependencies are missing, or a cycle is detected.
 func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	var req submitJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -60,14 +62,21 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := s.store.AddJob(req.Command, nil)
+	if len(req.DependsOn) > 0 {
+		if err := store.ValidateDependencies(s.store, req.DependsOn); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	id := s.store.AddJob(req.Command, req.DependsOn)
 	job, _ := s.store.GetJob(id)
 
-	log.Printf("[server] job %s submitted: %q", id, req.Command)
+	log.Printf("[server] job %s submitted: %q (depends_on: %v)", id, req.Command, req.DependsOn)
 	writeJSON(w, http.StatusCreated, job)
 }
 
-// handleGetJob handles Get /jobs/{id}
+// handleGetJob handles GET /jobs/{id}
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
@@ -88,7 +97,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, _ *http.Request) {
 
 // handleClaimJob handles GET /jobs/next
 // Atomically claims one pending job and returns it to the calling worker.
-// Returns 204 No Content if no jobs are available
+// Returns 204 No Content if no jobs are available.
 func (s *Server) handleClaimJob(w http.ResponseWriter, _ *http.Request) {
 	job, found := s.store.ClaimJob()
 	if !found {
@@ -102,6 +111,8 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, _ *http.Request) {
 
 // handleJobDone handles POST /jobs/{id}/done
 // Worker reports that a job completed successfully.
+// After marking the job done, unblocks any downstream jobs whose
+// dependencies are now fully satisfied.
 func (s *Server) handleJobDone(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
@@ -117,6 +128,7 @@ func (s *Server) handleJobDone(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.store.UpdateJobStatus(id, store.StatusDone)
+	s.store.UnblockReady()
 	log.Printf("[server] job %s marked done", id)
 	w.WriteHeader(http.StatusOK)
 }
