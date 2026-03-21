@@ -8,6 +8,8 @@ A lightweight distributed job scheduler written in Go.
 
 Workron is a distributed job scheduler that accepts jobs via a REST API and executes them across concurrent workers. It supports two deployment modes: a single-process standalone mode where the scheduler and workers share memory, and a distributed mode where the scheduler and workers run as separate binaries communicating over HTTP.
 
+Jobs can declare dependencies on other jobs, forming a DAG (directed acyclic graph). The scheduler validates the dependency graph at submission time, rejecting cycles, and only makes downstream jobs available for execution once all their upstream dependencies have completed.
+
 Jobs are persisted to SQLite, so in-flight and completed work survives a full scheduler restart. An in-memory store is also available for development and testing.
 
 Workers send periodic heartbeats while processing jobs. A background reaper on the scheduler detects stale heartbeats and re-queues orphaned jobs, ensuring no work is silently lost when a worker crashes.
@@ -23,22 +25,41 @@ If you are curious about the design decisions and trade-offs behind this project
 ## Features
 
 - Submit and monitor jobs via REST API
+- DAG-based job dependencies: jobs declare upstream dependencies, validated at submission time with cycle detection; downstream jobs execute only after all dependencies are complete
 - Pluggable storage: in-memory store for development, SQLite for persistence across restarts
 - Multiple concurrent workers with atomic job claiming (mutex in memory, `UPDATE ... RETURNING` in SQLite)
 - Automatic retry on failure, re-queued up to `MaxRetries` times before marked permanently failed
 - Two deployment modes: standalone (single process) or distributed (separate scheduler + worker binaries over HTTP)
-- Heartbeat-based failure detection — workers send heartbeats every 5 seconds, scheduler re-queues jobs with stale or missing heartbeats after 30 seconds
-- Graceful shutdown — workers finish their current job before exiting
+- Heartbeat-based failure detection: workers send heartbeats every 5 seconds, scheduler re-queues jobs with stale or missing heartbeats after 30 seconds
+- Graceful shutdown: workers finish their current job before exiting
 
 **Planned**
-- [ ] DAG-based job dependencies
-- [ ] Cron-style scheduling
-- [ ] Job priority queue
-- [ ] Web dashboard
+- [ ] PostgreSQL backend
+- [ ] Multi-scheduler support
+- [ ] Prometheus metrics and structured logging
+- [ ] Job cancellation
+- [ ] Configurable retry backoff and per-job timeouts
 
 ---
 
 ## Architecture
+
+### Job Lifecycle
+
+```
+Submit ──► pending ──► running ──► done
+               ▲          │
+               └── retry ─┘  (if attempts < max_retries)
+                          │
+                          ▼
+                       failed   (if retries exhausted)
+
+With dependencies:
+
+Submit ──► blocked ──► pending ──► running ──► done
+            (waits for all         (normal lifecycle)
+             deps to be done)
+```
 
 ### Standalone Mode
 
@@ -49,14 +70,16 @@ Everything runs in a single process. Workers access the job store directly throu
 │               Single Go Process              │
 │                                              │
 │   REST API  ──►  Job Store  ◄──  Workers     │
-│   (HTTP)       (memory/SQLite)  (goroutines) │
-│                  [pending]       Worker 1    │
-│                  [running]       Worker 2    │
-│                  [done]          Worker 3    │
+│   (HTTP)      (memory/SQLite)   (goroutines) │
+│                  [blocked]       Worker 1    │
+│                  [pending]       Worker 2    │
+│                  [running]       Worker 3    │
+│                  [done]                      │
 │                                              │
 │   Reaper (background goroutine)              │
 │   └─ scans running jobs every 10s            │
 │   └─ re-queues jobs with stale heartbeats    │
+│   └─ unblocks ready downstream jobs          │
 └──────────────────────────────────────────────┘
 ```
 
@@ -73,9 +96,9 @@ The scheduler and workers run as separate binaries. Workers poll the scheduler o
 │  (memory/SQLite)    │         │  Worker Process C    │
 │  Reaper             │         │                      │
 │                     │         │  Sends heartbeats    │
-│  Detects dead       │         │  every 5s while      │
-│  workers via stale  │         │  processing a job    │
-│  heartbeats         │         │                      │
+│  Validates DAGs     │         │  every 5s while      │
+│  Unblocks ready     │         │  processing a job    │
+│  jobs on completion │         │                      │
 └─────────────────────┘         └──────────────────────┘
     Source of truth                   Any machine
 ```
@@ -167,6 +190,44 @@ Response (`201 Created`):
 }
 ```
 
+### Submit a job with dependencies
+
+```bash
+curl -X POST http://localhost:8080/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"command": "echo step2", "depends_on": ["job-1"]}'
+```
+
+Response (`201 Created`):
+```json
+{
+  "id": "job-2",
+  "command": "echo step2",
+  "status": "blocked",
+  "created_at": "2026-03-13T12:00:01Z",
+  "max_retries": 3,
+  "attempts": 0,
+  "depends_on": ["job-1"]
+}
+```
+
+The job starts as `blocked` and transitions to `pending` automatically once all dependencies reach `done`. Returns `400` if any dependency ID does not exist or if the dependency graph would contain a cycle.
+
+### Submit a pipeline
+
+```bash
+JOB1=$(curl -s -X POST http://localhost:8080/jobs \
+  -d '{"command":"echo step1"}' | jq -r .id)
+
+JOB2=$(curl -s -X POST http://localhost:8080/jobs \
+  -d "{\"command\":\"echo step2\", \"depends_on\":[\"$JOB1\"]}" | jq -r .id)
+
+JOB3=$(curl -s -X POST http://localhost:8080/jobs \
+  -d "{\"command\":\"echo step3\", \"depends_on\":[\"$JOB2\"]}" | jq -r .id)
+
+# step1 runs immediately, step2 waits for step1, step3 waits for step2
+```
+
 ### Get job status
 
 ```bash
@@ -211,6 +272,23 @@ Workers call this automatically every 5 seconds while processing a job. Returns 
 
 ---
 
+## Job Dependencies (DAG)
+
+Jobs can declare dependencies on other jobs using the `depends_on` field. This creates a directed acyclic graph (DAG) where downstream jobs only execute after all their upstream dependencies complete.
+
+**How it works:**
+
+- A job with `depends_on` starts in `blocked` status instead of `pending`
+- When a job completes (`done`), the scheduler checks all `blocked` jobs and transitions any whose dependencies are fully satisfied to `pending`
+- At submission time, the scheduler validates that all referenced job IDs exist and that the new dependency would not create a cycle (using DFS-based cycle detection)
+- The reaper also checks for unblockable jobs on each tick as a safety net
+
+**What happens when a dependency fails?**
+
+Currently, if a dependency fails permanently, downstream jobs remain `blocked` indefinitely. This is a known limitation — a future improvement would cascade the failure or provide a way to manually unblock or cancel downstream jobs.
+
+---
+
 ## Failure Detection
 
 When a worker crashes mid-job, the scheduler detects it through missing heartbeats. A background reaper goroutine runs every 10 seconds and checks all running jobs:
@@ -227,9 +305,9 @@ This ensures no job gets stuck in `running` forever, even if a worker process is
 
 Workron supports two storage backends, selectable at startup via the `--db` flag:
 
-**In-memory store** (default) — jobs live only as long as the process runs. Fast, zero dependencies, ideal for development and testing.
+**In-memory store** (default): jobs live only as long as the process runs. Fast, zero dependencies, ideal for development and testing.
 
-**SQLite store** (`--db=workron.db`) — jobs persist to a single file on disk. The scheduler can crash and restart without losing any job state. Uses WAL mode for write performance and a single-connection pool to avoid SQLite's write lock contention. The first external dependency (`modernc.org/sqlite`, a pure Go port) — no C compiler or Docker required.
+**SQLite store** (`--db=workron.db`): jobs persist to a single file on disk. The scheduler can crash and restart without losing any job state. Uses WAL mode for write performance and a single-connection pool to avoid SQLite's write lock contention. The first external dependency (`modernc.org/sqlite`, a pure Go port), no C compiler or Docker required.
 
 Both backends implement the same `JobStore` interface. The server, workers, and reaper are unaware of which store they're using.
 
@@ -251,7 +329,9 @@ workron/
 │   │   ├── memory_test.go
 │   │   ├── sqlite.go            # SQLite store implementation
 │   │   ├── sqlite_test.go
-│   │   └── store_test.go        # Shared compliance tests for all store backends
+│   │   ├── store_test.go        # Shared compliance tests for all store backends
+│   │   ├── dag.go               # Cycle detection + dependency validation
+│   │   └── dag_test.go
 │   ├── scheduler/
 │   │   ├── server.go            # HTTP handlers
 │   │   ├── server_test.go
@@ -287,7 +367,7 @@ workron/
 
 ## Contributing
 
-This is a personal learning project and not yet ready for production use. Feedback and suggestions are welcome — feel free to open an issue.
+This is a personal learning project and not yet ready for production use. Feedback and suggestions are welcome, feel free to open an issue.
 
 ---
 
