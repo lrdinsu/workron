@@ -62,15 +62,17 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx := r.Context()
+
 	if len(req.DependsOn) > 0 {
-		if err := store.ValidateDependencies(s.store, req.DependsOn); err != nil {
+		if err := store.ValidateDependencies(ctx, s.store, req.DependsOn); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
 
-	id := s.store.AddJob(req.Command, req.DependsOn)
-	job, _ := s.store.GetJob(id)
+	id := s.store.AddJob(ctx, req.Command, req.DependsOn)
+	job, _ := s.store.GetJob(ctx, id)
 
 	log.Printf("[server] job %s submitted: %q (depends_on: %v)", id, req.Command, req.DependsOn)
 	writeJSON(w, http.StatusCreated, job)
@@ -80,7 +82,7 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	job, found := s.store.GetJob(id)
+	job, found := s.store.GetJob(r.Context(), id)
 	if !found {
 		http.Error(w, "job not found", http.StatusNotFound)
 		return
@@ -90,16 +92,16 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListJobs handles GET /jobs
-func (s *Server) handleListJobs(w http.ResponseWriter, _ *http.Request) {
-	jobs := s.store.ListJobs()
+func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	jobs := s.store.ListJobs(r.Context())
 	writeJSON(w, http.StatusOK, jobs)
 }
 
 // handleClaimJob handles GET /jobs/next
 // Atomically claims one pending job and returns it to the calling worker.
 // Returns 204 No Content if no jobs are available.
-func (s *Server) handleClaimJob(w http.ResponseWriter, _ *http.Request) {
-	job, found := s.store.ClaimJob()
+func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
+	job, found := s.store.ClaimJob(r.Context())
 	if !found {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -115,8 +117,9 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, _ *http.Request) {
 // dependencies are now fully satisfied.
 func (s *Server) handleJobDone(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	ctx := r.Context()
 
-	job, found := s.store.GetJob(id)
+	job, found := s.store.GetJob(ctx, id)
 	if !found {
 		http.Error(w, "job not found", http.StatusNotFound)
 		return
@@ -127,8 +130,8 @@ func (s *Server) handleJobDone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.UpdateJobStatus(id, store.StatusDone)
-	s.store.UnblockReady()
+	s.store.UpdateJobStatus(ctx, id, store.StatusDone)
+	s.store.UnblockReady(ctx)
 	log.Printf("[server] job %s marked done", id)
 	w.WriteHeader(http.StatusOK)
 }
@@ -137,8 +140,9 @@ func (s *Server) handleJobDone(w http.ResponseWriter, r *http.Request) {
 // Worker reports that a job failed. The scheduler decides whether to retry.
 func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	ctx := r.Context()
 
-	job, found := s.store.GetJob(id)
+	job, found := s.store.GetJob(ctx, id)
 	if !found {
 		http.Error(w, "job not found", http.StatusNotFound)
 		return
@@ -152,10 +156,10 @@ func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 	// Retry logic: if attempts haven't been exhausted, re-queue as pending
 	if job.Attempts < job.MaxRetries {
 		log.Printf("[server] job %s failed (attempt %d/%d), re-queuing", id, job.Attempts, job.MaxRetries)
-		s.store.UpdateJobStatus(id, store.StatusPending)
+		s.store.UpdateJobStatus(ctx, id, store.StatusPending)
 	} else {
 		log.Printf("[server] job %s failed permanently after %d attempts", id, job.Attempts)
-		s.store.UpdateJobStatus(id, store.StatusFailed)
+		s.store.UpdateJobStatus(ctx, id, store.StatusFailed)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -165,8 +169,9 @@ func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 // Worker signals it is still alive and working on this job.
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	ctx := r.Context()
 
-	job, found := s.store.GetJob(id)
+	job, found := s.store.GetJob(ctx, id)
 	if !found {
 		http.Error(w, "job not found", http.StatusNotFound)
 		return
@@ -177,7 +182,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.UpdateHeartbeat(id)
+	s.store.UpdateHeartbeat(ctx, id)
 	w.WriteHeader(http.StatusOK)
 }
 

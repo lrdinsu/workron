@@ -9,72 +9,76 @@ import (
 )
 
 func TestReap_RequeuesStaleJob(t *testing.T) {
+	ctx := context.Background()
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello", nil)
-	s.ClaimJob() // attempt 1 of 3, status = running
+	id := s.AddJob(ctx, "echo hello", nil)
+	s.ClaimJob(ctx) // attempt 1 of 3, status = running
 
 	s.SetLastHeartbeat(id, time.Now().Add(-60*time.Second))
 
-	reap(s)
+	reap(ctx, s)
 
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(ctx, id)
 	if job.Status != store.StatusPending {
 		t.Errorf("expected status pending, got %s", job.Status)
 	}
 }
 
 func TestReap_FailsJobWithExhaustedRetries(t *testing.T) {
+	ctx := context.Background()
 	s := store.NewMemoryStore()
-	id := s.AddJob("bad command", nil)
+	id := s.AddJob(ctx, "bad command", nil)
 
 	// Exhaust all 3 retries
 	for i := 0; i < 3; i++ {
-		s.ClaimJob()
+		s.ClaimJob(ctx)
 		if i < 2 {
-			s.UpdateJobStatus(id, store.StatusPending)
+			s.UpdateJobStatus(ctx, id, store.StatusPending)
 		}
 	}
 
 	s.SetLastHeartbeat(id, time.Now().Add(-60*time.Second))
 
-	reap(s)
+	reap(ctx, s)
 
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(ctx, id)
 	if job.Status != store.StatusFailed {
 		t.Errorf("expected status failed, got %s", job.Status)
 	}
 }
 
 func TestReap_IgnoresHealthyJob(t *testing.T) {
+	ctx := context.Background()
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello", nil)
-	s.ClaimJob()
-	s.UpdateHeartbeat(id) // fresh heartbeat
+	id := s.AddJob(ctx, "echo hello", nil)
+	s.ClaimJob(ctx)
+	s.UpdateHeartbeat(ctx, id) // fresh heartbeat
 
-	reap(s)
+	reap(ctx, s)
 
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(ctx, id)
 	if job.Status != store.StatusRunning {
 		t.Errorf("expected status running, got %s", job.Status)
 	}
 }
 
 func TestReap_IgnoresPendingAndDoneJobs(t *testing.T) {
+	ctx := context.Background()
 	s := store.NewMemoryStore()
-	id1 := s.AddJob("echo one", nil)
-	id2 := s.AddJob("echo two", nil)
+	id1 := s.AddJob(ctx, "echo one", nil)
+	id2 := s.AddJob(ctx, "echo two", nil)
 
 	// Claim both, then mark both as done
-	s.ClaimJob()
-	s.ClaimJob()
-	s.UpdateJobStatus(id1, store.StatusDone)
-	s.UpdateJobStatus(id2, store.StatusDone)
+	s.ClaimJob(ctx)
+	s.ClaimJob(ctx)
+	s.UpdateJobStatus(ctx, id1, store.StatusDone)
+	s.UpdateJobStatus(ctx, id2, store.StatusDone)
 
-	reap(s)
+	reap(ctx, s)
 
 	// Neither should be affected, ListRunningJobs returns nothing
 	for _, id := range []string{id1, id2} {
-		job, _ := s.GetJob(id)
+		job, _ := s.GetJob(ctx, id)
 		if job.Status != store.StatusDone {
 			t.Errorf("job %s: expected status donw, got %s", id, job.Status)
 		}
@@ -82,14 +86,15 @@ func TestReap_IgnoresPendingAndDoneJobs(t *testing.T) {
 }
 
 func TestReap_RequeuesJobWithNilHeartbeat(t *testing.T) {
+	ctx := context.Background()
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello", nil)
-	s.ClaimJob() // running, no heartbeat, but StartedAt is now
+	id := s.AddJob(ctx, "echo hello", nil)
+	s.ClaimJob(ctx) // running, no heartbeat, but StartedAt is now
 
 	// With a fresh StartedAt, reaper should leave it alone
-	reap(s)
+	reap(ctx, s)
 
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(ctx, id)
 	if job.Status != store.StatusRunning {
 		t.Errorf("expected status running, got %s", job.Status)
 	}
@@ -116,16 +121,17 @@ func TestStartReaper_StopsOnContextCancel(t *testing.T) {
 }
 
 func TestReap_RequeuesJobWithNilHeartbeatAndStaleStart(t *testing.T) {
+	ctx := context.Background()
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello", nil)
-	s.ClaimJob()
+	id := s.AddJob(ctx, "echo hello", nil)
+	s.ClaimJob(ctx)
 
 	// Simulate a job that was claimed 60 seconds ago but never sent a heartbeat
 	s.SetStartedAt(id, time.Now().Add(-60*time.Second))
 
-	reap(s)
+	reap(ctx, s)
 
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(ctx, id)
 	if job.Status != store.StatusPending {
 		t.Errorf("expected status pending, got %s", job.Status)
 	}
