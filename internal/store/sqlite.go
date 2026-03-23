@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -79,7 +80,7 @@ func migrate(db *sql.DB) error {
 
 // JobStore implementation
 
-func (s *SQLiteStore) AddJob(command string, dependsOn []string) string {
+func (s *SQLiteStore) AddJob(ctx context.Context, command string, dependsOn []string) string {
 	id := generateID()
 	now := time.Now()
 
@@ -93,7 +94,7 @@ func (s *SQLiteStore) AddJob(command string, dependsOn []string) string {
 		panic(fmt.Sprintf("sqlite: marshal depends_on: %v", err))
 	}
 
-	_, err = s.db.Exec(
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO jobs (id, command, status, created_at, max_retries, attempts, depends_on)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		id, command, string(status), now, 3, 0, string(depsJSON),
@@ -108,8 +109,8 @@ func (s *SQLiteStore) AddJob(command string, dependsOn []string) string {
 	return id
 }
 
-func (s *SQLiteStore) GetJob(id string) (*Job, bool) {
-	row := s.db.QueryRow(
+func (s *SQLiteStore) GetJob(ctx context.Context, id string) (*Job, bool) {
+	row := s.db.QueryRowContext(ctx,
 		`SELECT id, command, status, created_at, started_at, done_at,
 		        last_heartbeat, max_retries, attempts, depends_on
 		 FROM jobs WHERE id = ?`, id,
@@ -117,8 +118,8 @@ func (s *SQLiteStore) GetJob(id string) (*Job, bool) {
 	return scanJob(row)
 }
 
-func (s *SQLiteStore) ClaimJob() (*Job, bool) {
-	row := s.db.QueryRow(`
+func (s *SQLiteStore) ClaimJob(ctx context.Context) (*Job, bool) {
+	row := s.db.QueryRowContext(ctx, `
 		UPDATE jobs SET status = 'running', started_at = ?, attempts = attempts + 1, last_heartbeat = NULL
 		WHERE id = (SELECT id FROM jobs WHERE status = 'pending' LIMIT 1)
 		RETURNING id, command, status, created_at, started_at, done_at,
@@ -128,14 +129,14 @@ func (s *SQLiteStore) ClaimJob() (*Job, bool) {
 	return scanJob(row)
 }
 
-func (s *SQLiteStore) UpdateJobStatus(id string, status JobStatus) {
+func (s *SQLiteStore) UpdateJobStatus(ctx context.Context, id string, status JobStatus) {
 	var doneAt *time.Time
 	if status == StatusDone || status == StatusFailed {
 		t := time.Now()
 		doneAt = &t
 	}
 
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE jobs SET status = ?, done_at = ? WHERE id = ?`,
 		string(status), doneAt, id,
 	)
@@ -144,19 +145,19 @@ func (s *SQLiteStore) UpdateJobStatus(id string, status JobStatus) {
 	}
 }
 
-func (s *SQLiteStore) ListJobs() []*Job {
-	return s.queryJobs(`SELECT id, command, status, created_at, started_at, done_at,
+func (s *SQLiteStore) ListJobs(ctx context.Context) []*Job {
+	return s.queryJobs(ctx, `SELECT id, command, status, created_at, started_at, done_at,
 	                            last_heartbeat, max_retries, attempts, depends_on FROM jobs`)
 }
 
-func (s *SQLiteStore) ListRunningJobs() []*Job {
-	return s.queryJobs(`SELECT id, command, status, created_at, started_at, done_at,
+func (s *SQLiteStore) ListRunningJobs(ctx context.Context) []*Job {
+	return s.queryJobs(ctx, `SELECT id, command, status, created_at, started_at, done_at,
 	                            last_heartbeat, max_retries, attempts, depends_on
 	                     FROM jobs WHERE status = 'running'`)
 }
 
-func (s *SQLiteStore) UpdateHeartbeat(id string) {
-	_, err := s.db.Exec(
+func (s *SQLiteStore) UpdateHeartbeat(ctx context.Context, id string) {
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE jobs SET last_heartbeat = ? WHERE id = ?`,
 		time.Now(), id,
 	)
@@ -166,16 +167,16 @@ func (s *SQLiteStore) UpdateHeartbeat(id string) {
 }
 
 // SendHeartbeat wraps UpdateHeartbeat to satisfy the worker.JobSource interface.
-func (s *SQLiteStore) SendHeartbeat(id string) error {
-	s.UpdateHeartbeat(id)
+func (s *SQLiteStore) SendHeartbeat(ctx context.Context, id string) error {
+	s.UpdateHeartbeat(ctx, id)
 	return nil
 }
 
 // UnblockReady transitions blocked jobs to pending when all their
 // dependencies have completed. Uses json_each to check each element
 // of the depends_on JSON array against the jobs table.
-func (s *SQLiteStore) UnblockReady() {
-	_, err := s.db.Exec(`
+func (s *SQLiteStore) UnblockReady(ctx context.Context) {
+	_, err := s.db.ExecContext(ctx, `
 		UPDATE jobs SET status = 'pending'
 		WHERE status = 'blocked'
 		AND NOT EXISTS (
@@ -228,8 +229,8 @@ func scanJob(row *sql.Row) (*Job, bool) {
 }
 
 // queryJobs runs a SELECT query and scans all result rows into Jobs.
-func (s *SQLiteStore) queryJobs(query string, args ...any) []*Job {
-	rows, err := s.db.Query(query, args...)
+func (s *SQLiteStore) queryJobs(ctx context.Context, query string, args ...any) []*Job {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		panic(fmt.Sprintf("sqlite: query jobs: %v", err))
 	}

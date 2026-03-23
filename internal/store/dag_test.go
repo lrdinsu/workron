@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // Note on cycle testing:
 // In normal usage, cycles are structurally impossible, you can only depend
@@ -14,8 +17,9 @@ import "testing"
 
 func TestValidateDeps_NoDependencies(t *testing.T) {
 	s := NewMemoryStore()
+	ctx := context.Background()
 
-	err := ValidateDependencies(s, nil)
+	err := ValidateDependencies(ctx, s, nil)
 
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -24,8 +28,9 @@ func TestValidateDeps_NoDependencies(t *testing.T) {
 
 func TestValidateDeps_EmptySlice(t *testing.T) {
 	s := NewMemoryStore()
+	ctx := context.Background()
 
-	err := ValidateDependencies(s, []string{})
+	err := ValidateDependencies(ctx, s, []string{})
 
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -34,12 +39,13 @@ func TestValidateDeps_EmptySlice(t *testing.T) {
 
 func TestValidateDeps_LinearChain(t *testing.T) {
 	s := NewMemoryStore()
+	ctx := context.Background()
 	// A <- B <- C <- new
-	idA := s.AddJob("echo a", nil)
-	idB := s.AddJob("echo b", []string{idA})
-	idC := s.AddJob("echo c", []string{idB})
+	idA := s.AddJob(ctx, "echo a", nil)
+	idB := s.AddJob(ctx, "echo b", []string{idA})
+	idC := s.AddJob(ctx, "echo c", []string{idB})
 
-	err := ValidateDependencies(s, []string{idC})
+	err := ValidateDependencies(ctx, s, []string{idC})
 
 	if err != nil {
 		t.Errorf("unexpected error for valid linear chain: %v", err)
@@ -48,17 +54,18 @@ func TestValidateDeps_LinearChain(t *testing.T) {
 
 func TestValidateDeps_Diamond(t *testing.T) {
 	s := NewMemoryStore()
+	ctx := context.Background()
 	//     A
 	//    / \
 	//   B   C
 	//    \ /
 	//     D ← new
-	idA := s.AddJob("echo a", nil)
-	idB := s.AddJob("echo b", []string{idA})
-	idC := s.AddJob("echo c", []string{idA})
-	idD := s.AddJob("echo d", []string{idB, idC})
+	idA := s.AddJob(ctx, "echo a", nil)
+	idB := s.AddJob(ctx, "echo b", []string{idA})
+	idC := s.AddJob(ctx, "echo c", []string{idA})
+	idD := s.AddJob(ctx, "echo d", []string{idB, idC})
 
-	err := ValidateDependencies(s, []string{idD})
+	err := ValidateDependencies(ctx, s, []string{idD})
 
 	if err != nil {
 		t.Errorf("unexpected error for valid diamond DAG: %v", err)
@@ -67,12 +74,13 @@ func TestValidateDeps_Diamond(t *testing.T) {
 
 func TestValidateDeps_MultipleDependencies(t *testing.T) {
 	s := NewMemoryStore()
-	idA := s.AddJob("echo a", nil)
-	idB := s.AddJob("echo b", nil)
-	idC := s.AddJob("echo c", nil)
+	ctx := context.Background()
+	idA := s.AddJob(ctx, "echo a", nil)
+	idB := s.AddJob(ctx, "echo b", nil)
+	idC := s.AddJob(ctx, "echo c", nil)
 
 	// New job depends on all three independent jobs.
-	err := ValidateDependencies(s, []string{idA, idB, idC})
+	err := ValidateDependencies(ctx, s, []string{idA, idB, idC})
 
 	if err != nil {
 		t.Errorf("unexpected error for multiple independent deps: %v", err)
@@ -83,9 +91,10 @@ func TestValidateDeps_MultipleDependencies(t *testing.T) {
 
 func TestValidateDeps_NonexistentDependency(t *testing.T) {
 	s := NewMemoryStore()
-	s.AddJob("echo a", nil)
+	ctx := context.Background()
+	s.AddJob(ctx, "echo a", nil)
 
-	err := ValidateDependencies(s, []string{"nonexistent"})
+	err := ValidateDependencies(ctx, s, []string{"nonexistent"})
 
 	if err == nil {
 		t.Error("expected error for nonexistent dependency")
@@ -94,9 +103,10 @@ func TestValidateDeps_NonexistentDependency(t *testing.T) {
 
 func TestValidateDeps_OneValidOneMissing(t *testing.T) {
 	s := NewMemoryStore()
-	idA := s.AddJob("echo a", nil)
+	ctx := context.Background()
+	idA := s.AddJob(ctx, "echo a", nil)
 
-	err := ValidateDependencies(s, []string{idA, "nonexistent"})
+	err := ValidateDependencies(ctx, s, []string{idA, "nonexistent"})
 
 	if err == nil {
 		t.Error("expected error when one dependency is missing")
@@ -107,8 +117,9 @@ func TestValidateDeps_OneValidOneMissing(t *testing.T) {
 
 func TestValidateDeps_SimpleCycle(t *testing.T) {
 	s := NewMemoryStore()
-	idA := s.AddJob("echo a", nil)
-	idB := s.AddJob("echo b", nil)
+	ctx := context.Background()
+	idA := s.AddJob(ctx, "echo a", nil)
+	idB := s.AddJob(ctx, "echo b", nil)
 
 	// Manually create A -> B -> A cycle in the store.
 	s.mu.Lock()
@@ -117,7 +128,7 @@ func TestValidateDeps_SimpleCycle(t *testing.T) {
 	s.mu.Unlock()
 
 	// New job depends on A, traversal hits A -> B -> A.
-	err := ValidateDependencies(s, []string{idA})
+	err := ValidateDependencies(ctx, s, []string{idA})
 
 	if err == nil {
 		t.Error("expected cycle error")
@@ -126,9 +137,10 @@ func TestValidateDeps_SimpleCycle(t *testing.T) {
 
 func TestValidateDeps_TransitiveCycle(t *testing.T) {
 	s := NewMemoryStore()
-	idA := s.AddJob("echo a", nil)
-	idB := s.AddJob("echo b", nil)
-	idC := s.AddJob("echo c", nil)
+	ctx := context.Background()
+	idA := s.AddJob(ctx, "echo a", nil)
+	idB := s.AddJob(ctx, "echo b", nil)
+	idC := s.AddJob(ctx, "echo c", nil)
 
 	// Manually create A -> B -> C -> A cycle.
 	s.mu.Lock()
@@ -137,7 +149,7 @@ func TestValidateDeps_TransitiveCycle(t *testing.T) {
 	s.jobs[idC].DependsOn = []string{idA}
 	s.mu.Unlock()
 
-	err := ValidateDependencies(s, []string{idA})
+	err := ValidateDependencies(ctx, s, []string{idA})
 
 	if err == nil {
 		t.Error("expected cycle error for transitive cycle")
@@ -146,14 +158,15 @@ func TestValidateDeps_TransitiveCycle(t *testing.T) {
 
 func TestValidateDeps_SelfDependency(t *testing.T) {
 	s := NewMemoryStore()
-	idA := s.AddJob("echo a", nil)
+	ctx := context.Background()
+	idA := s.AddJob(ctx, "echo a", nil)
 
 	// Manually make A depend on itself.
 	s.mu.Lock()
 	s.jobs[idA].DependsOn = []string{idA}
 	s.mu.Unlock()
 
-	err := ValidateDependencies(s, []string{idA})
+	err := ValidateDependencies(ctx, s, []string{idA})
 
 	if err == nil {
 		t.Error("expected cycle error for self-dependency")
@@ -162,15 +175,16 @@ func TestValidateDeps_SelfDependency(t *testing.T) {
 
 func TestValidateDeps_CycleErrorMessage(t *testing.T) {
 	s := NewMemoryStore()
-	idA := s.AddJob("echo a", nil)
-	idB := s.AddJob("echo b", nil)
+	ctx := context.Background()
+	idA := s.AddJob(ctx, "echo a", nil)
+	idB := s.AddJob(ctx, "echo b", nil)
 
 	s.mu.Lock()
 	s.jobs[idA].DependsOn = []string{idB}
 	s.jobs[idB].DependsOn = []string{idA}
 	s.mu.Unlock()
 
-	err := ValidateDependencies(s, []string{idA})
+	err := ValidateDependencies(ctx, s, []string{idA})
 
 	if err == nil {
 		t.Fatal("expected cycle error")

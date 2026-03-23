@@ -1,18 +1,21 @@
 package store
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // ValidateDependencies checks that all referenced job IDs exist and that
 // adding a new job with the given dependencies would not create a cycle.
 // Returns nil if valid, or a descriptive error if not.
-func ValidateDependencies(s JobStore, dependsOn []string) error {
+func ValidateDependencies(ctx context.Context, s JobStore, dependsOn []string) error {
 	if len(dependsOn) == 0 {
 		return nil
 	}
 
 	// Check all referenced IDs exist.
 	for _, depID := range dependsOn {
-		if _, found := s.GetJob(depID); !found {
+		if _, found := s.GetJob(ctx, depID); !found {
 			return fmt.Errorf("dependency %q does not exist", depID)
 		}
 	}
@@ -20,7 +23,7 @@ func ValidateDependencies(s JobStore, dependsOn []string) error {
 	// Build adjacency list: node -> list of nodes it depends on.
 	// Include all existing jobs plus a temporary node for the new job.
 	graph := make(map[string][]string)
-	for _, job := range s.ListJobs() {
+	for _, job := range s.ListJobs(ctx) {
 		graph[job.ID] = job.DependsOn
 	}
 
