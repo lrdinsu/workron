@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func newTestMemoryStore(t *testing.T) JobStore {
 	t.Helper()
@@ -115,15 +118,16 @@ func TestMemory_UnblockReadyFullPipeline(t *testing.T) {
 
 func TestMemoryStore_AddAndClaimJob(t *testing.T) {
 	store := NewMemoryStore()
+	ctx := context.Background()
 
 	// Test adding a Job
-	id := store.AddJob("echo test", nil)
+	id := store.AddJob(ctx, "echo test", nil)
 	if id == "" {
 		t.Fatalf("Expected a valid ID, got an empty string")
 	}
 
 	// Test claiming a Job
-	job, found := store.ClaimJob()
+	job, found := store.ClaimJob(ctx)
 	if !found {
 		t.Fatalf("Expected a Job to be found, got none")
 	}
@@ -138,7 +142,7 @@ func TestMemoryStore_AddAndClaimJob(t *testing.T) {
 	}
 
 	// Ensure we can't claim the same Job again
-	_, foundAgain := store.ClaimJob()
+	_, foundAgain := store.ClaimJob(ctx)
 	if foundAgain {
 		t.Errorf("Expected no pending jobs to claim, but found one")
 	}
@@ -146,16 +150,18 @@ func TestMemoryStore_AddAndClaimJob(t *testing.T) {
 
 func TestMemoryStore_ListRunningJobs(t *testing.T) {
 	s := NewMemoryStore()
+	ctx := context.Background()
+
 	// All pending
-	s.AddJob("echo one", nil)
-	s.AddJob("echo two", nil)
-	s.AddJob("echo three", nil)
+	s.AddJob(ctx, "echo one", nil)
+	s.AddJob(ctx, "echo two", nil)
+	s.AddJob(ctx, "echo three", nil)
 
 	// One and two become running
-	s.ClaimJob()
-	s.ClaimJob()
+	s.ClaimJob(ctx)
+	s.ClaimJob(ctx)
 
-	running := s.ListRunningJobs()
+	running := s.ListRunningJobs(ctx)
 	if len(running) != 2 {
 		t.Errorf("expected 2 running jobs, got %d", len(running))
 	}

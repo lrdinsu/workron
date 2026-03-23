@@ -14,14 +14,14 @@ func waitForStatus(t *testing.T, s *store.MemoryStore, id string, expected store
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		job, found := s.GetJob(id)
+		job, found := s.GetJob(context.Background(), id)
 		if found && job.Status == expected {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	job, found := s.GetJob(id)
+	job, found := s.GetJob(context.Background(), id)
 	if !found {
 		t.Errorf("job %s: not found in store after %v", id, timeout)
 		return
@@ -31,7 +31,7 @@ func waitForStatus(t *testing.T, s *store.MemoryStore, id string, expected store
 
 func TestWorker_ProcessesJobSuccessfully(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello", nil)
+	id := s.AddJob(context.Background(), "echo hello", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -44,7 +44,7 @@ func TestWorker_ProcessesJobSuccessfully(t *testing.T) {
 
 func TestWorker_MarksFailedJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("thiscommanddoesnotexist", nil)
+	id := s.AddJob(context.Background(), "thiscommanddoesnotexist", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -58,7 +58,7 @@ func TestWorker_MarksFailedJob(t *testing.T) {
 
 func TestWorker_RetriesFailedJobBeforeGivingUp(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("thiscommanddoesnotexist", nil)
+	id := s.AddJob(context.Background(), "thiscommanddoesnotexist", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -69,7 +69,7 @@ func TestWorker_RetriesFailedJobBeforeGivingUp(t *testing.T) {
 	waitForStatus(t, s, id, store.StatusFailed, 5*time.Second)
 
 	// Verify it was attempted exactly MaxRetries times, not just once
-	job, found := s.GetJob(id)
+	job, found := s.GetJob(context.Background(), id)
 	if !found {
 		t.Fatal("job not found after completion")
 	}
@@ -83,7 +83,7 @@ func TestWorker_DoesNotRetryJobThatSucceeds(t *testing.T) {
 	s := store.NewMemoryStore()
 	// This command should succeed on the first attempt, so the worker
 	// should not requeue or retry it.
-	id := s.AddJob("echo hello", nil)
+	id := s.AddJob(context.Background(), "echo hello", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -94,7 +94,7 @@ func TestWorker_DoesNotRetryJobThatSucceeds(t *testing.T) {
 	waitForStatus(t, s, id, store.StatusDone, 3*time.Second)
 
 	// A successful job should only have been attempted once
-	job, found := s.GetJob(id)
+	job, found := s.GetJob(context.Background(), id)
 	if !found {
 		t.Fatal("job not found after completion")
 	}
@@ -133,7 +133,7 @@ func TestWorker_MultipleWorkerNoDuplicates(t *testing.T) {
 	// Submit 5 jobs
 	ids := make([]string, 5)
 	for i := range ids {
-		ids[i] = s.AddJob("echo hello", nil)
+		ids[i] = s.AddJob(context.Background(), "echo hello", nil)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -152,7 +152,7 @@ func TestWorker_MultipleWorkerNoDuplicates(t *testing.T) {
 
 	// Verify every job is done exactly once, none stuck in running or pending
 	for _, id := range ids {
-		job, found := s.GetJob(id)
+		job, found := s.GetJob(context.Background(), id)
 		if !found {
 			t.Errorf("job %s not found in store", id)
 			continue
@@ -171,7 +171,7 @@ func TestWorker_MultipleWorkerNoDuplicates(t *testing.T) {
 
 func TestWorker_SendsHeartbeatsDuringLongJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("sleep 12", nil)
+	id := s.AddJob(context.Background(), "sleep 12", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -182,7 +182,7 @@ func TestWorker_SendsHeartbeatsDuringLongJob(t *testing.T) {
 	// Wait long enough for at least 2 heartbeats (an interval is 5s)
 	time.Sleep(12 * time.Second)
 
-	job, found := s.GetJob(id)
+	job, found := s.GetJob(context.Background(), id)
 	if !found {
 		t.Fatal("job not found")
 	}
@@ -200,7 +200,7 @@ func TestWorker_SendsHeartbeatsDuringLongJob(t *testing.T) {
 
 func TestWorker_HeartbeatStopsAfterJobCompletes(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello", nil) // finishes instantly
+	id := s.AddJob(context.Background(), "echo hello", nil) // finishes instantly
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -211,14 +211,14 @@ func TestWorker_HeartbeatStopsAfterJobCompletes(t *testing.T) {
 	waitForStatus(t, s, id, store.StatusDone, 3*time.Second)
 
 	// Record the heartbeat timestamp (if any) right after completion
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(context.Background(), id)
 	heartbeatAfterDone := job.LastHeartbeat
 
 	// Wait longer than one heartbeat interval
 	time.Sleep(6 * time.Second)
 
 	// Heartbeat should not have advanced, the goroutine should be stopped
-	job, _ = s.GetJob(id)
+	job, _ = s.GetJob(context.Background(), id)
 	if job.LastHeartbeat != nil && heartbeatAfterDone != nil && job.LastHeartbeat.After(*heartbeatAfterDone) {
 		t.Error("heartbeat continued after job completed, possible goroutine leak")
 	}

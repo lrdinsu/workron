@@ -12,9 +12,7 @@ import (
 
 // PostgresStore implements JobStore backed by a PostgreSQL database.
 type PostgresStore struct {
-	pool   *pgxpool.Pool
-	ctx    context.Context
-	cancel context.CancelFunc
+	pool *pgxpool.Pool
 }
 
 // NewPostgresStore connects to a PostgreSQL database, runs schema migrations,
@@ -38,13 +36,11 @@ func NewPostgresStore(ctx context.Context, connString string, poolSize int) (*Po
 		return nil, fmt.Errorf("run migrations: %w", err)
 	}
 
-	storeCtx, cancel := context.WithCancel(ctx)
-	return &PostgresStore{pool: pool, ctx: storeCtx, cancel: cancel}, nil
+	return &PostgresStore{pool: pool}, nil
 }
 
 // Close shuts down the connection pool.
 func (s *PostgresStore) Close() {
-	s.cancel()
 	s.pool.Close()
 }
 
@@ -68,7 +64,7 @@ func pgMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 // --- JobStore implementation ---
 
-func (s *PostgresStore) AddJob(command string, dependsOn []string) string {
+func (s *PostgresStore) AddJob(ctx context.Context, command string, dependsOn []string) string {
 	id := generateID()
 	now := time.Now()
 
@@ -85,7 +81,7 @@ func (s *PostgresStore) AddJob(command string, dependsOn []string) string {
 		panic(fmt.Sprintf("postgres: marshal depends_on: %v", err))
 	}
 
-	_, err = s.pool.Exec(s.ctx,
+	_, err = s.pool.Exec(ctx,
 		`INSERT INTO jobs (id, command, status, created_at, max_retries, attempts, depends_on)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
 		id, command, string(status), now, 3, 0, string(depsJSON),
@@ -97,8 +93,8 @@ func (s *PostgresStore) AddJob(command string, dependsOn []string) string {
 	return id
 }
 
-func (s *PostgresStore) GetJob(id string) (*Job, bool) {
-	row := s.pool.QueryRow(s.ctx,
+func (s *PostgresStore) GetJob(ctx context.Context, id string) (*Job, bool) {
+	row := s.pool.QueryRow(ctx,
 		`SELECT id, command, status, created_at, started_at, done_at,
 		        last_heartbeat, max_retries, attempts, depends_on
 		 FROM jobs WHERE id = $1`, id,
@@ -106,8 +102,8 @@ func (s *PostgresStore) GetJob(id string) (*Job, bool) {
 	return pgScanJob(row)
 }
 
-func (s *PostgresStore) ClaimJob() (*Job, bool) {
-	row := s.pool.QueryRow(s.ctx, `
+func (s *PostgresStore) ClaimJob(ctx context.Context) (*Job, bool) {
+	row := s.pool.QueryRow(ctx, `
 		WITH claimed AS (
 			SELECT id FROM jobs
 			WHERE status = 'pending'
@@ -123,14 +119,14 @@ func (s *PostgresStore) ClaimJob() (*Job, bool) {
 	return pgScanJob(row)
 }
 
-func (s *PostgresStore) UpdateJobStatus(id string, status JobStatus) {
+func (s *PostgresStore) UpdateJobStatus(ctx context.Context, id string, status JobStatus) {
 	var doneAt *time.Time
 	if status == StatusDone || status == StatusFailed {
 		t := time.Now()
 		doneAt = &t
 	}
 
-	_, err := s.pool.Exec(s.ctx,
+	_, err := s.pool.Exec(ctx,
 		`UPDATE jobs SET status = $1, done_at = $2 WHERE id = $3`,
 		string(status), doneAt, id,
 	)
@@ -139,19 +135,19 @@ func (s *PostgresStore) UpdateJobStatus(id string, status JobStatus) {
 	}
 }
 
-func (s *PostgresStore) ListJobs() []*Job {
-	return s.pgQueryJobs(`SELECT id, command, status, created_at, started_at, done_at,
+func (s *PostgresStore) ListJobs(ctx context.Context) []*Job {
+	return s.pgQueryJobs(ctx, `SELECT id, command, status, created_at, started_at, done_at,
 	                              last_heartbeat, max_retries, attempts, depends_on FROM jobs`)
 }
 
-func (s *PostgresStore) ListRunningJobs() []*Job {
-	return s.pgQueryJobs(`SELECT id, command, status, created_at, started_at, done_at,
+func (s *PostgresStore) ListRunningJobs(ctx context.Context) []*Job {
+	return s.pgQueryJobs(ctx, `SELECT id, command, status, created_at, started_at, done_at,
 	                              last_heartbeat, max_retries, attempts, depends_on
 	                       FROM jobs WHERE status = 'running'`)
 }
 
-func (s *PostgresStore) UpdateHeartbeat(id string) {
-	_, err := s.pool.Exec(s.ctx,
+func (s *PostgresStore) UpdateHeartbeat(ctx context.Context, id string) {
+	_, err := s.pool.Exec(ctx,
 		`UPDATE jobs SET last_heartbeat = $1 WHERE id = $2`,
 		time.Now(), id,
 	)
@@ -161,16 +157,16 @@ func (s *PostgresStore) UpdateHeartbeat(id string) {
 }
 
 // SendHeartbeat wraps UpdateHeartbeat to satisfy the worker.JobSource interface.
-func (s *PostgresStore) SendHeartbeat(id string) error {
-	s.UpdateHeartbeat(id)
+func (s *PostgresStore) SendHeartbeat(ctx context.Context, id string) error {
+	s.UpdateHeartbeat(ctx, id)
 	return nil
 }
 
 // UnblockReady transitions blocked jobs to pending when all their
 // dependencies have completed. Uses jsonb_array_elements_text to check
 // each element of the depends_on JSONB array against the jobs table.
-func (s *PostgresStore) UnblockReady() {
-	_, err := s.pool.Exec(s.ctx, `
+func (s *PostgresStore) UnblockReady(ctx context.Context) {
+	_, err := s.pool.Exec(ctx, `
 		UPDATE jobs SET status = 'pending'
 		WHERE status = 'blocked'
 		AND NOT EXISTS (
@@ -213,8 +209,8 @@ func pgScanJob(row pgx.Row) (*Job, bool) {
 }
 
 // pgQueryJobs runs a SELECT query and scans all result rows into Jobs.
-func (s *PostgresStore) pgQueryJobs(query string, args ...any) []*Job {
-	rows, err := s.pool.Query(s.ctx, query, args...)
+func (s *PostgresStore) pgQueryJobs(ctx context.Context, query string, args ...any) []*Job {
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		panic(fmt.Sprintf("postgres: query jobs: %v", err))
 	}

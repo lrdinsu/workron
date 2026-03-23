@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -20,7 +21,7 @@ func NewMemoryStore() *MemoryStore {
 
 // AddJob safely creates a new job and adds it to the map.
 // Jobs with dependencies start as blocked; jobs without start as pending.
-func (s *MemoryStore) AddJob(command string, dependsOn []string) string {
+func (s *MemoryStore) AddJob(_ context.Context, command string, dependsOn []string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -45,7 +46,7 @@ func (s *MemoryStore) AddJob(command string, dependsOn []string) string {
 
 // ClaimJob atomically finds a pending job and marks it as running.
 // This ensures two workers don't grab the same job.
-func (s *MemoryStore) ClaimJob() (*Job, bool) {
+func (s *MemoryStore) ClaimJob(_ context.Context) (*Job, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -65,7 +66,7 @@ func (s *MemoryStore) ClaimJob() (*Job, bool) {
 }
 
 // GetJob safely retrieves a job by its ID
-func (s *MemoryStore) GetJob(id string) (*Job, bool) {
+func (s *MemoryStore) GetJob(_ context.Context, id string) (*Job, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -79,7 +80,7 @@ func (s *MemoryStore) GetJob(id string) (*Job, bool) {
 }
 
 // UpdateJobStatus safely updates a job's completion state
-func (s *MemoryStore) UpdateJobStatus(id string, status JobStatus) {
+func (s *MemoryStore) UpdateJobStatus(_ context.Context, id string, status JobStatus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -93,7 +94,7 @@ func (s *MemoryStore) UpdateJobStatus(id string, status JobStatus) {
 }
 
 // ListJobs returns all jobs currently in the store in no particular order
-func (s *MemoryStore) ListJobs() []*Job {
+func (s *MemoryStore) ListJobs(_ context.Context) []*Job {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -106,7 +107,7 @@ func (s *MemoryStore) ListJobs() []*Job {
 }
 
 // ListRunningJobs returns all jobs currently in running status
-func (s *MemoryStore) ListRunningJobs() []*Job {
+func (s *MemoryStore) ListRunningJobs(_ context.Context) []*Job {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -125,7 +126,7 @@ func (s *MemoryStore) ListRunningJobs() []*Job {
 
 // UpdateHeartbeat records the current time as the last known sign of life for a running job.
 // Used by the timeout checker to detect dead workers.
-func (s *MemoryStore) UpdateHeartbeat(id string) {
+func (s *MemoryStore) UpdateHeartbeat(_ context.Context, id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -137,15 +138,15 @@ func (s *MemoryStore) UpdateHeartbeat(id string) {
 
 // SendHeartbeat wraps UpdateHeartbeat to satisfy the worker.JobSource interface.
 // In-process, this never fails.
-func (s *MemoryStore) SendHeartbeat(id string) error {
-	s.UpdateHeartbeat(id)
+func (s *MemoryStore) SendHeartbeat(ctx context.Context, id string) error {
+	s.UpdateHeartbeat(ctx, id)
 	return nil
 }
 
 // UnblockReady transitions blocked jobs to pending when all their
 // dependencies have completed. A job is unblocked only if every ID
 // in its DependsOn list has status done.
-func (s *MemoryStore) UnblockReady() {
+func (s *MemoryStore) UnblockReady(_ context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

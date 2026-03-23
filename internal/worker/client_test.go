@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"net/http/httptest"
 	"testing"
 
@@ -20,11 +21,12 @@ func newTestScheduler(t *testing.T) (*SchedulerClient, *store.MemoryStore, func(
 }
 
 func TestSchedulerClient_ClaimJob(t *testing.T) {
+	ctx := context.Background()
 	client, s, cleanup := newTestScheduler(t)
 	defer cleanup()
 
 	// No jobs available
-	job, found := client.ClaimJob()
+	job, found := client.ClaimJob(ctx)
 	if found {
 		t.Fatal("expected no job, but got one")
 	}
@@ -33,8 +35,8 @@ func TestSchedulerClient_ClaimJob(t *testing.T) {
 	}
 
 	// Add a job and claim it
-	id := s.AddJob("echo hello", nil)
-	job, found = client.ClaimJob()
+	id := s.AddJob(ctx, "echo hello", nil)
+	job, found = client.ClaimJob(ctx)
 	if !found {
 		t.Fatal("expected to claim a job")
 	}
@@ -47,97 +49,102 @@ func TestSchedulerClient_ClaimJob(t *testing.T) {
 }
 
 func TestSchedulerClient_ReportDone(t *testing.T) {
+	ctx := context.Background()
 	client, s, cleanup := newTestScheduler(t)
 	defer cleanup()
 
-	id := s.AddJob("echo hello", nil)
-	s.ClaimJob() // move to running
+	id := s.AddJob(ctx, "echo hello", nil)
+	s.ClaimJob(ctx) // move to running
 
-	err := client.ReportDone(id)
+	err := client.ReportDone(ctx, id)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(ctx, id)
 	if job.Status != store.StatusDone {
 		t.Errorf("expected status done, got %s", job.Status)
 	}
 }
 
 func TestSchedulerClient_ReportFail_Retries(t *testing.T) {
+	ctx := context.Background()
 	client, s, cleanup := newTestScheduler(t)
 	defer cleanup()
 
-	s.AddJob("bad command", nil)
-	s.ClaimJob() // attempt 1 of 3
+	s.AddJob(ctx, "bad command", nil)
+	s.ClaimJob(ctx) // attempt 1 of 3
 
-	job, _ := s.GetJob(s.ListJobs()[0].ID)
-	err := client.ReportFail(job.ID)
+	job, _ := s.GetJob(ctx, s.ListJobs(ctx)[0].ID)
+	err := client.ReportFail(ctx, job.ID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// Scheduler should re-queue since attempts(1) < maxRetries(3)
-	updated, _ := s.GetJob(job.ID)
+	updated, _ := s.GetJob(ctx, job.ID)
 	if updated.Status != store.StatusPending {
 		t.Errorf("expected status pending (retry), got %s", updated.Status)
 	}
 }
 
 func TestSchedulerClient_ReportFail_Permanent(t *testing.T) {
+	ctx := context.Background()
 	client, s, cleanup := newTestScheduler(t)
 	defer cleanup()
 
-	id := s.AddJob("bad command", nil)
+	id := s.AddJob(ctx, "bad command", nil)
 
 	// Exhaust all 3 retries
 	for i := 0; i < 3; i++ {
-		s.ClaimJob()
+		s.ClaimJob(ctx)
 		if i < 2 {
-			s.UpdateJobStatus(id, store.StatusPending)
+			s.UpdateJobStatus(ctx, id, store.StatusPending)
 		}
 	}
 
-	err := client.ReportFail(id)
+	err := client.ReportFail(ctx, id)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(ctx, id)
 	if job.Status != store.StatusFailed {
 		t.Errorf("expected status failed, got %s", job.Status)
 	}
 }
 
 func TestSchedulerClient_UpdateJobStatus(t *testing.T) {
+	ctx := context.Background()
 	client, s, cleanup := newTestScheduler(t)
 	defer cleanup()
 
-	id := s.AddJob("echo hello", nil)
-	s.ClaimJob() // move to running
+	id := s.AddJob(ctx, "echo hello", nil)
+	s.ClaimJob(ctx) // move to running
 
 	// UpdateJobStatus with StatusDone should call ReportDone
-	client.UpdateJobStatus(id, store.StatusDone)
+	client.UpdateJobStatus(ctx, id, store.StatusDone)
 
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(ctx, id)
 	if job.Status != store.StatusDone {
 		t.Errorf("expected status done, got %s", job.Status)
 	}
 }
 
 func TestSchedulerClient_SendHeartbeat(t *testing.T) {
+	ctx := context.Background()
 	client, s, cleanup := newTestScheduler(t)
 	defer cleanup()
 
-	id := s.AddJob("echo hello", nil)
-	s.ClaimJob() // move to running
+	id := s.AddJob(ctx, "echo hello", nil)
+	s.ClaimJob(ctx) // move to running
 
-	err := client.SendHeartbeat(id)
+	err := client.SendHeartbeat(ctx, id)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(ctx, id)
 	if job.LastHeartbeat == nil {
 		t.Error("expected last_heartbeat to be set after heartbeat")
 	}

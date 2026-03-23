@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -125,13 +126,14 @@ func TestSQLite_UnblockReadyFullPipeline(t *testing.T) {
 
 func TestSQLite_PersistenceAcrossReopen(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
 
 	// Open, add a job, close.
 	s1, err := NewSQLiteStore(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := s1.AddJob("echo persist", nil)
+	id := s1.AddJob(ctx, "echo persist", nil)
 	_ = s1.Close()
 
 	// Reopen the same file.
@@ -141,7 +143,7 @@ func TestSQLite_PersistenceAcrossReopen(t *testing.T) {
 	}
 	defer func() { _ = s2.Close() }()
 
-	job, found := s2.GetJob(id)
+	job, found := s2.GetJob(ctx, id)
 	if !found {
 		t.Fatal("job not found after reopening database")
 	}
@@ -155,13 +157,14 @@ func TestSQLite_PersistenceAcrossReopen(t *testing.T) {
 
 func TestSQLite_PersistenceDependsOnSurvivesReopen(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
 
 	s1, err := NewSQLiteStore(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	depID := s1.AddJob("echo dep", nil)
-	childID := s1.AddJob("echo child", []string{depID})
+	depID := s1.AddJob(ctx, "echo dep", nil)
+	childID := s1.AddJob(ctx, "echo child", []string{depID})
 	_ = s1.Close()
 
 	s2, err := NewSQLiteStore(dbPath)
@@ -170,7 +173,7 @@ func TestSQLite_PersistenceDependsOnSurvivesReopen(t *testing.T) {
 	}
 	defer func() { _ = s2.Close() }()
 
-	job, found := s2.GetJob(childID)
+	job, found := s2.GetJob(ctx, childID)
 	if !found {
 		t.Fatal("child job not found after reopening database")
 	}

@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -72,7 +73,7 @@ func TestHandleSubmitJob_InvalidJSON(t *testing.T) {
 
 func TestHandleGetJob_Found(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello", nil)
+	id := s.AddJob(context.Background(), "echo hello", nil)
 	srv := NewServer(s)
 
 	r := httptest.NewRequest(http.MethodGet, "/jobs/"+id, nil)
@@ -131,8 +132,8 @@ func TestHandleListJobs_Empty(t *testing.T) {
 
 func TestHandleListJobs_WithJobs(t *testing.T) {
 	s := store.NewMemoryStore()
-	s.AddJob("echo hello", nil)
-	s.AddJob("echo world", nil)
+	s.AddJob(context.Background(), "echo hello", nil)
+	s.AddJob(context.Background(), "echo world", nil)
 	srv := NewServer(s)
 
 	r := httptest.NewRequest(http.MethodGet, "/jobs", nil)
@@ -156,7 +157,7 @@ func TestHandleListJobs_WithJobs(t *testing.T) {
 
 func TestHandleClaimJob_ReturnsJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello", nil)
+	id := s.AddJob(context.Background(), "echo hello", nil)
 	srv := NewServer(s)
 
 	r := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
@@ -197,7 +198,7 @@ func TestHandleClaimJob_NoJobs(t *testing.T) {
 
 func TestHandleClaimJob_SkipsRunningJobs(t *testing.T) {
 	s := store.NewMemoryStore()
-	s.AddJob("echo first", nil)
+	s.AddJob(context.Background(), "echo first", nil)
 	srv := NewServer(s)
 
 	// Claim the only job
@@ -221,10 +222,10 @@ func TestHandleClaimJob_SkipsRunningJobs(t *testing.T) {
 
 func TestHandleJobDone_Success(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello", nil)
+	id := s.AddJob(context.Background(), "echo hello", nil)
 
 	// Claim the job first so it's in running state
-	s.ClaimJob()
+	s.ClaimJob(context.Background())
 
 	srv := NewServer(s)
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/done", nil)
@@ -236,7 +237,7 @@ func TestHandleJobDone_Success(t *testing.T) {
 		t.Errorf("expected status 200, got %d", w.Code)
 	}
 
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(context.Background(), id)
 	if job.Status != store.StatusDone {
 		t.Errorf("expected status done, got %s", job.Status)
 	}
@@ -256,7 +257,7 @@ func TestHandleJobDone_NotFound(t *testing.T) {
 
 func TestHandleJobDone_NotRunning(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello", nil) // status is pending, not running
+	id := s.AddJob(context.Background(), "echo hello", nil) // status is pending, not running
 	srv := NewServer(s)
 
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/done", nil)
@@ -271,10 +272,10 @@ func TestHandleJobDone_NotRunning(t *testing.T) {
 
 func TestHandleJobFail_RetriesJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("bad command", nil)
+	id := s.AddJob(context.Background(), "bad command", nil)
 
 	// Claim it (attempt 1 of 3)
-	s.ClaimJob()
+	s.ClaimJob(context.Background())
 
 	srv := NewServer(s)
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/fail", nil)
@@ -286,7 +287,7 @@ func TestHandleJobFail_RetriesJob(t *testing.T) {
 	}
 
 	// Job should be re-queued as pending since attempts(1) < maxRetries(3)
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(context.Background(), id)
 	if job.Status != store.StatusPending {
 		t.Errorf("expected status pending (retry), got %s", job.Status)
 	}
@@ -294,14 +295,14 @@ func TestHandleJobFail_RetriesJob(t *testing.T) {
 
 func TestHandleJobFail_PermanentFailure(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("bad command", nil)
+	id := s.AddJob(context.Background(), "bad command", nil)
 
 	// Exhaust all retries by claiming 3 times
 	for i := 0; i < 3; i++ {
-		s.ClaimJob()
+		s.ClaimJob(context.Background())
 		if i < 2 {
 			// Re-queue for the next claim
-			s.UpdateJobStatus(id, store.StatusPending)
+			s.UpdateJobStatus(context.Background(), id, store.StatusPending)
 		}
 	}
 
@@ -317,7 +318,7 @@ func TestHandleJobFail_PermanentFailure(t *testing.T) {
 	}
 
 	// Job should be permanently failed since attempts(3) >= maxRetries(3)
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(context.Background(), id)
 	if job.Status != store.StatusFailed {
 		t.Errorf("expected status failed, got %s", job.Status)
 	}
@@ -325,8 +326,8 @@ func TestHandleJobFail_PermanentFailure(t *testing.T) {
 
 func TestHandleHeartbeat_Success(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello", nil)
-	s.ClaimJob() // move to running
+	id := s.AddJob(context.Background(), "echo hello", nil)
+	s.ClaimJob(context.Background()) // move to running
 
 	srv := NewServer(s)
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/heartbeat", nil)
@@ -338,7 +339,7 @@ func TestHandleHeartbeat_Success(t *testing.T) {
 		t.Errorf("expected status 200, got %d", w.Code)
 	}
 
-	job, _ := s.GetJob(id)
+	job, _ := s.GetJob(context.Background(), id)
 	if job.LastHeartbeat == nil {
 		t.Error("expected last_heartbeat to be set")
 	}
@@ -358,7 +359,7 @@ func TestHandleHeartbeat_NotFound(t *testing.T) {
 
 func TestHandleHeartbeat_NotRunning(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob("echo hello", nil) // status is pending, not running
+	id := s.AddJob(context.Background(), "echo hello", nil) // status is pending, not running
 	srv := NewServer(s)
 
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/heartbeat", nil)
@@ -375,7 +376,7 @@ func TestHandleHeartbeat_NotRunning(t *testing.T) {
 
 func TestHandleSubmitJob_WithDependencies(t *testing.T) {
 	s := store.NewMemoryStore()
-	depID := s.AddJob("echo dep", nil)
+	depID := s.AddJob(context.Background(), "echo dep", nil)
 	srv := NewServer(s)
 
 	body := bytes.NewBufferString(`{"command": "echo child", "depends_on": ["` + depID + `"]}`)
@@ -440,8 +441,8 @@ func TestHandleSubmitJob_NonexistentDependency(t *testing.T) {
 
 func TestHandleJobDone_UnblocksDownstream(t *testing.T) {
 	s := store.NewMemoryStore()
-	depID := s.AddJob("echo dep", nil)
-	childID := s.AddJob("echo child", []string{depID})
+	depID := s.AddJob(context.Background(), "echo dep", nil)
+	childID := s.AddJob(context.Background(), "echo child", []string{depID})
 	srv := NewServer(s)
 
 	// Claim and complete the dependency via HTTP.
@@ -462,7 +463,7 @@ func TestHandleJobDone_UnblocksDownstream(t *testing.T) {
 	}
 
 	// Child should now be pending.
-	child, _ := s.GetJob(childID)
+	child, _ := s.GetJob(context.Background(), childID)
 	if child.Status != store.StatusPending {
 		t.Errorf("expected child status pending after dep completed, got %s", child.Status)
 	}
@@ -487,14 +488,14 @@ func TestHandleJobDone_UnblocksDownstream(t *testing.T) {
 
 func TestHandleJobDone_DoesNotUnblockPartialDeps(t *testing.T) {
 	s := store.NewMemoryStore()
-	dep1 := s.AddJob("echo a", nil)
-	dep2 := s.AddJob("echo b", nil)
-	childID := s.AddJob("echo child", []string{dep1, dep2})
+	dep1 := s.AddJob(context.Background(), "echo a", nil)
+	dep2 := s.AddJob(context.Background(), "echo b", nil)
+	childID := s.AddJob(context.Background(), "echo child", []string{dep1, dep2})
 	srv := NewServer(s)
 
 	// Claim both so we can complete just one.
-	s.ClaimJob()
-	s.ClaimJob()
+	s.ClaimJob(context.Background())
+	s.ClaimJob(context.Background())
 
 	// Complete only dep1.
 	doneReq := httptest.NewRequest(http.MethodPost, "/jobs/"+dep1+"/done", nil)
@@ -506,7 +507,7 @@ func TestHandleJobDone_DoesNotUnblockPartialDeps(t *testing.T) {
 	}
 
 	// Child should still be blocked, dep2 is running, not done.
-	child, _ := s.GetJob(childID)
+	child, _ := s.GetJob(context.Background(), childID)
 	if child.Status != store.StatusBlocked {
 		t.Errorf("expected child status blocked (dep2 not done), got %s", child.Status)
 	}
@@ -567,8 +568,8 @@ func TestHandlePipeline_EndToEnd(t *testing.T) {
 	doneW := httptest.NewRecorder()
 	srv.ServeHTTP(doneW, doneReq)
 
-	s2, _ := s.GetJob(step2.ID)
-	s3, _ := s.GetJob(step3.ID)
+	s2, _ := s.GetJob(context.Background(), step2.ID)
+	s3, _ := s.GetJob(context.Background(), step3.ID)
 	if s2.Status != store.StatusPending {
 		t.Errorf("step2 expected pending, got %s", s2.Status)
 	}
@@ -585,7 +586,7 @@ func TestHandlePipeline_EndToEnd(t *testing.T) {
 	doneW2 := httptest.NewRecorder()
 	srv.ServeHTTP(doneW2, doneReq2)
 
-	s3, _ = s.GetJob(step3.ID)
+	s3, _ = s.GetJob(context.Background(), step3.ID)
 	if s3.Status != store.StatusPending {
 		t.Errorf("step3 expected pending after step2 done, got %s", s3.Status)
 	}
@@ -601,7 +602,7 @@ func TestHandlePipeline_EndToEnd(t *testing.T) {
 
 	// All three should be done.
 	for _, id := range []string{step1.ID, step2.ID, step3.ID} {
-		job, _ := s.GetJob(id)
+		job, _ := s.GetJob(context.Background(), id)
 		if job.Status != store.StatusDone {
 			t.Errorf("job %s expected done, got %s", id, job.Status)
 		}
