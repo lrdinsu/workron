@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -24,10 +25,15 @@ func NewSchedulerClient(baseURL string) *SchedulerClient {
 	}
 }
 
-// ClaimJob class Get /jobs/next on the scheduler to atomically claim a pending job.
-// Returns (nil, false) if not jobs are available (204 No Content).
-func (c *SchedulerClient) ClaimJob() (*store.Job, bool) {
-	resp, err := c.httpClient.Get(c.baseURL + "/jobs/next")
+// ClaimJob calls GET /jobs/next on the scheduler to atomically claim a pending job.
+// Returns (nil, false) if no jobs are available (204 No Content).
+func (c *SchedulerClient) ClaimJob(ctx context.Context) (*store.Job, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/jobs/next", nil)
+	if err != nil {
+		return nil, false
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, false
 	}
@@ -55,8 +61,13 @@ func (c *SchedulerClient) ClaimJob() (*store.Job, bool) {
 }
 
 // ReportDone tells the scheduler that a job completed successfully.
-func (c *SchedulerClient) ReportDone(id string) error {
-	resp, err := c.httpClient.Post(c.baseURL+"/jobs/"+id+"/done", "", nil)
+func (c *SchedulerClient) ReportDone(ctx context.Context, id string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/jobs/"+id+"/done", nil)
+	if err != nil {
+		return fmt.Errorf("report done for job %s: %w", id, err)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("report done for job %s: %w", id, err)
 	}
@@ -76,8 +87,13 @@ func (c *SchedulerClient) ReportDone(id string) error {
 
 // ReportFail tells the scheduler that a job failed.
 // The scheduler decides whether to retry or mark as permanently failed.
-func (c *SchedulerClient) ReportFail(id string) error {
-	resp, err := c.httpClient.Post(c.baseURL+"/jobs/"+id+"/fail", "", nil)
+func (c *SchedulerClient) ReportFail(ctx context.Context, id string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/jobs/"+id+"/fail", nil)
+	if err != nil {
+		return fmt.Errorf("report fail for job %s: %w", id, err)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("report fail for job %s: %w", id, err)
 	}
@@ -97,16 +113,16 @@ func (c *SchedulerClient) ReportFail(id string) error {
 // UpdateJobStatus maps done/failed status to the appropriate HTTP call.
 // This satisfies the JobSource interface, allowing the worker to use
 // the same code path for both direct store access and HTTP communication.
-func (c *SchedulerClient) UpdateJobStatus(id string, status store.JobStatus) {
+func (c *SchedulerClient) UpdateJobStatus(ctx context.Context, id string, status store.JobStatus) {
 	var err error
 
 	switch status {
 	case store.StatusDone:
-		err = c.ReportDone(id)
+		err = c.ReportDone(ctx, id)
 	case store.StatusFailed, store.StatusPending:
 		// Both "permanently failed" and "retry" are handled server-side.
 		// The worker just reports failure; the scheduler decides the outcome.
-		err = c.ReportFail(id)
+		err = c.ReportFail(ctx, id)
 	}
 
 	if err != nil {
@@ -116,8 +132,13 @@ func (c *SchedulerClient) UpdateJobStatus(id string, status store.JobStatus) {
 }
 
 // SendHeartbeat tells the scheduler the worker is still alive and working on this job.
-func (c *SchedulerClient) SendHeartbeat(id string) error {
-	resp, err := c.httpClient.Post(c.baseURL+"/jobs/"+id+"/heartbeat", "", nil)
+func (c *SchedulerClient) SendHeartbeat(ctx context.Context, id string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/jobs/"+id+"/heartbeat", nil)
+	if err != nil {
+		return fmt.Errorf("heartbeat for job %s: %w", id, err)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("heartbeat for job %s: %w", id, err)
 	}
