@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // JobStore defines the behavior any storage backend must have
@@ -44,7 +46,7 @@ type Job struct {
 	DependsOn     []string   `json:"depends_on,omitempty"`
 }
 
-// Generate a unique ID using UnixNano
+// generateID returns a unique job ID using a UUID v4.
 func generateID() string {
-	return fmt.Sprintf("job-%d", time.Now().UnixNano())
+	return fmt.Sprintf("job-%s", uuid.New().String())
 }
