@@ -111,11 +111,13 @@ func (s *PostgresStore) ClaimJob(ctx context.Context) (*Job, bool) {
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
-		UPDATE jobs SET status = 'running', started_at = now(), attempts = attempts + 1, last_heartbeat = NULL
+		UPDATE jobs SET status = 'running', started_at = $1, attempts = attempts + 1, last_heartbeat = NULL
 		FROM claimed
 		WHERE jobs.id = claimed.id
 		RETURNING jobs.id, jobs.command, jobs.status, jobs.created_at, jobs.started_at,
-		          jobs.done_at, jobs.last_heartbeat, jobs.max_retries, jobs.attempts, jobs.depends_on`)
+		          jobs.done_at, jobs.last_heartbeat, jobs.max_retries, jobs.attempts, jobs.depends_on`,
+		time.Now(),
+	)
 	return pgScanJob(row)
 }
 
