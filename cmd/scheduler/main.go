@@ -21,30 +21,44 @@ func main() {
 	mode := flag.String("mode", "scheduler", "scheduler (HTTP API only) | standalone (API + local workers)")
 	port := flag.Int("port", 8080, "port to listen on")
 	numWorkers := flag.Int("workers", 3, "number of concurrent workers (standalone mode only)")
-	dbPath := flag.String("db", "", "path to SQLite database file (empty = in-memory store)")
+	dbDriver := flag.String("db-driver", "memory", "storage backend: memory, sqlite, postgres")
+	dbURL := flag.String("db-url", "", "database connection string (SQLite path or PostgreSQL URL)")
 	flag.Parse()
 
-	// Initialize store: SQLite if --db is set, otherwise in-memory
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	var s store.JobStore
-	if *dbPath != "" {
-		sqliteStore, err := store.NewSQLiteStore(*dbPath)
+	switch *dbDriver {
+	case "postgres":
+		if *dbURL == "" {
+			log.Fatal("[main] --db-url is required for postgres driver")
+		}
+		pgStore, err := store.NewPostgresStore(ctx, *dbURL, 10)
 		if err != nil {
-			log.Fatalf("[main] failed to open database: %v", err)
+			log.Fatalf("[main] failed to connect to PostgreSQL: %v", err)
+		}
+		defer pgStore.Close()
+		s = pgStore
+		log.Printf("[main] using PostgreSQL store")
+	case "sqlite":
+		if *dbURL == "" {
+			log.Fatal("[main] --db-url is required for sqlite driver")
+		}
+		sqliteStore, err := store.NewSQLiteStore(*dbURL)
+		if err != nil {
+			log.Fatalf("[main] failed to open SQLite database: %v", err)
 		}
 		defer func() { _ = sqliteStore.Close() }()
 		s = sqliteStore
-		log.Printf("[main] using SQLite store: %s", *dbPath)
-	} else {
+		log.Printf("[main] using SQLite store: %s", *dbURL)
+	default:
 		s = store.NewMemoryStore()
 		log.Println("[main] using in-memory store")
 	}
 
 	// Initialize the server
 	srv := scheduler.NewServer(s)
-
-	// Context for graceful shutdown, canceled when OS signal is received
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Start the heartbeat reaper to detect dead workers
 	go scheduler.StartReaper(ctx, s)
