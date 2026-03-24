@@ -10,7 +10,7 @@ Workron is a distributed job scheduler that accepts jobs via a REST API and exec
 
 Jobs can declare dependencies on other jobs, forming a DAG (directed acyclic graph). The scheduler validates the dependency graph at submission time, rejecting cycles, and only makes downstream jobs available for execution once all their upstream dependencies have completed.
 
-Jobs are persisted to SQLite, so in-flight and completed work survives a full scheduler restart. An in-memory store is also available for development and testing.
+Jobs are persisted to SQLite or PostgreSQL, so in-flight and completed work survives a full scheduler restart. PostgreSQL uses `FOR UPDATE SKIP LOCKED` for safe concurrent job claiming across multiple connections, preparing for multi-scheduler deployments. An in-memory store is also available for development and testing.
 
 Workers send periodic heartbeats while processing jobs. A background reaper on the scheduler detects stale heartbeats and re-queues orphaned jobs, ensuring no work is silently lost when a worker crashes.
 
@@ -26,19 +26,20 @@ If you are curious about the design decisions and trade-offs behind this project
 
 - Submit and monitor jobs via REST API
 - DAG-based job dependencies: jobs declare upstream dependencies, validated at submission time with cycle detection; downstream jobs execute only after all dependencies are complete
-- Pluggable storage: in-memory store for development, SQLite for persistence across restarts
-- Multiple concurrent workers with atomic job claiming (mutex in memory, `UPDATE ... RETURNING` in SQLite)
+- Pluggable storage: in-memory for development, SQLite for single-node persistence, PostgreSQL for concurrent multi-connection access
+- Multiple concurrent workers with atomic job claiming (mutex in memory, `UPDATE ... RETURNING` in SQLite, `FOR UPDATE SKIP LOCKED` in PostgreSQL)
 - Automatic retry on failure, re-queued up to `MaxRetries` times before marked permanently failed
 - Two deployment modes: standalone (single process) or distributed (separate scheduler + worker binaries over HTTP)
 - Heartbeat-based failure detection: workers send heartbeats every 5 seconds, scheduler re-queues jobs with stale or missing heartbeats after 30 seconds
 - Graceful shutdown: workers finish their current job before exiting
 
 **Planned**
-- [ ] PostgreSQL backend
-- [ ] Multi-scheduler support
+- [ ] Multi-scheduler coordination (advisory locks for reaper)
 - [ ] Prometheus metrics and structured logging
-- [ ] Job cancellation
+- [ ] Job cancellation (with cascading cancel for DAGs)
 - [ ] Configurable retry backoff and per-job timeouts
+- [ ] Backpressure and concurrency control
+- [ ] Worker routing (queue topics and capability tags)
 
 ---
 
@@ -70,7 +71,7 @@ Everything runs in a single process. Workers access the job store directly throu
 │               Single Go Process              │
 │                                              │
 │   REST API  ──►  Job Store  ◄──  Workers     │
-│   (HTTP)      (memory/SQLite)   (goroutines) │
+│   (HTTP)      (mem/SQLite/PG)  (goroutines)  │
 │                  [blocked]       Worker 1    │
 │                  [pending]       Worker 2    │
 │                  [running]       Worker 3    │
@@ -93,7 +94,7 @@ The scheduler and workers run as separate binaries. Workers poll the scheduler o
 │                     │  HTTP   │                      │
 │  REST API           │◄───────►│  Worker Process A    │
 │  Job Store          │         │  Worker Process B    │
-│  (memory/SQLite)    │         │  Worker Process C    │
+│  (mem/SQLite/PG)    │         │  Worker Process C    │
 │  Reaper             │         │                      │
 │                     │         │  Sends heartbeats    │
 │  Validates DAGs     │         │  every 5s while      │
@@ -112,6 +113,7 @@ Both modes use the same `JobSource` interface, so the worker code is identical r
 ### Prerequisites
 
 - Go 1.22+
+- Docker (for PostgreSQL only)
 
 ### Installation
 
@@ -131,6 +133,9 @@ make run-standalone
 
 # With SQLite persistence
 make run-standalone-sqlite
+
+# With PostgreSQL persistence (requires: make run-postgres)
+make run-standalone-postgres
 ```
 
 ### Distributed Mode
@@ -148,6 +153,22 @@ make run-worker
 curl -X POST http://localhost:8080/jobs -d '{"command":"echo hello"}'
 ```
 
+### PostgreSQL Setup
+
+```bash
+# Copy the example env file and adjust credentials if needed
+cp .env.example .env
+
+# Start PostgreSQL via Docker Compose
+make run-postgres
+
+# Run PostgreSQL compliance tests
+make test-postgres
+
+# Stop PostgreSQL
+make stop-postgres
+```
+
 ### CLI Flags
 
 **Scheduler** (`cmd/scheduler`)
@@ -157,7 +178,8 @@ curl -X POST http://localhost:8080/jobs -d '{"command":"echo hello"}'
 | `--mode` | `scheduler` | `scheduler` (HTTP API only) or `standalone` (API + local workers) |
 | `--port` | `8080` | Port for the REST API |
 | `--workers` | `3` | Number of local workers (standalone mode only) |
-| `--db` | `""` | Path to SQLite database file (empty = in-memory store) |
+| `--db-driver` | `memory` | Storage backend: `memory`, `sqlite`, `postgres` |
+| `--db-url` | `""` | Database connection string (SQLite file path or PostgreSQL URL) |
 
 **Worker** (`cmd/worker`)
 
@@ -303,13 +325,15 @@ This ensures no job gets stuck in `running` forever, even if a worker process is
 
 ## Persistence
 
-Workron supports two storage backends, selectable at startup via the `--db` flag:
+Workron supports three storage backends, selectable at startup via `--db-driver`:
 
 **In-memory store** (default): jobs live only as long as the process runs. Fast, zero dependencies, ideal for development and testing.
 
-**SQLite store** (`--db=workron.db`): jobs persist to a single file on disk. The scheduler can crash and restart without losing any job state. Uses WAL mode for write performance and a single-connection pool to avoid SQLite's write lock contention. The first external dependency (`modernc.org/sqlite`, a pure Go port), no C compiler or Docker required.
+**SQLite store** (`--db-driver=sqlite --db-url=workron.db`): jobs persist to a single file on disk. The scheduler can crash and restart without losing any job state. Uses WAL mode for write performance and a single-connection pool to avoid SQLite's write lock contention. Uses `modernc.org/sqlite` (pure Go, no CGo).
 
-Both backends implement the same `JobStore` interface. The server, workers, and reaper are unaware of which store they're using.
+**PostgreSQL store** (`--db-driver=postgres --db-url=postgres://...`): jobs persist to PostgreSQL with a configurable connection pool (default 10 connections). Uses `FOR UPDATE SKIP LOCKED` for atomic job claiming, allowing multiple connections (or future multiple scheduler instances) to claim different jobs concurrently without blocking each other. Dependencies stored as JSONB, queried with `jsonb_array_elements_text()`. Uses `pgx/v5` for native PostgreSQL support.
+
+All three backends implement the same `JobStore` interface. The server, workers, and reaper are unaware of which store they're using.
 
 ---
 
@@ -329,7 +353,9 @@ workron/
 │   │   ├── memory_test.go
 │   │   ├── sqlite.go            # SQLite store implementation
 │   │   ├── sqlite_test.go
-│   │   ├── store_test.go        # Shared compliance tests for all store backends
+│   │   ├── postgres.go          # PostgreSQL store implementation (pgx/v5)
+│   │   ├── postgres_test.go     # PG tests (build tag: postgres)
+│   │   ├── store_test.go        # Shared compliance tests for all backends
 │   │   ├── dag.go               # Cycle detection + dependency validation
 │   │   └── dag_test.go
 │   ├── scheduler/
@@ -344,6 +370,8 @@ workron/
 │       ├── executor_test.go
 │       ├── client.go            # HTTP client for talking to scheduler
 │       └── client_test.go
+├── docker-compose.yml           # Local PostgreSQL for development
+├── .env.example                 # Environment variable template
 ├── Makefile
 ├── .gitignore
 ├── go.mod
@@ -360,8 +388,11 @@ workron/
 | Language | Go 1.22+ |
 | HTTP | `net/http` (stdlib only) |
 | Job execution | `os/exec` (stdlib) |
-| Storage | In-memory or SQLite (`modernc.org/sqlite`) |
-| External dependencies | `modernc.org/sqlite` (pure Go, no CGo) |
+| Storage | In-memory, SQLite, or PostgreSQL |
+| SQLite driver | `modernc.org/sqlite` (pure Go, no CGo) |
+| PostgreSQL driver | `jackc/pgx/v5` (native pgxpool, no database/sql) |
+| ID generation | `google/uuid` (UUID v4) |
+| Local dev | Docker Compose (PostgreSQL 16) |
 
 ---
 
