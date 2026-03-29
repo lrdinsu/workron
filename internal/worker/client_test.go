@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"log/slog"
 	"net/http/httptest"
 	"testing"
 
@@ -14,7 +15,7 @@ import (
 func newTestScheduler(t *testing.T) (*SchedulerClient, *store.MemoryStore, func()) {
 	t.Helper()
 	s := store.NewMemoryStore()
-	srv := scheduler.NewServer(s)
+	srv := scheduler.NewServer(s, slog.Default())
 	ts := httptest.NewServer(srv)
 	client := NewSchedulerClient(ts.URL)
 	return client, s, ts.Close

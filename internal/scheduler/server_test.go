@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,7 +14,7 @@ import (
 
 // newTestServer creates a server backed by a fresh MemoryStore for each test
 func newTestServer() *Server {
-	return NewServer(store.NewMemoryStore())
+	return NewServer(store.NewMemoryStore(), slog.Default())
 }
 
 func TestHandleSubmitJob_Success(t *testing.T) {
@@ -74,7 +75,7 @@ func TestHandleSubmitJob_InvalidJSON(t *testing.T) {
 func TestHandleGetJob_Found(t *testing.T) {
 	s := store.NewMemoryStore()
 	id := s.AddJob(context.Background(), "echo hello", nil)
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 
 	r := httptest.NewRequest(http.MethodGet, "/jobs/"+id, nil)
 	w := httptest.NewRecorder()
@@ -134,7 +135,7 @@ func TestHandleListJobs_WithJobs(t *testing.T) {
 	s := store.NewMemoryStore()
 	s.AddJob(context.Background(), "echo hello", nil)
 	s.AddJob(context.Background(), "echo world", nil)
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 
 	r := httptest.NewRequest(http.MethodGet, "/jobs", nil)
 	w := httptest.NewRecorder()
@@ -158,7 +159,7 @@ func TestHandleListJobs_WithJobs(t *testing.T) {
 func TestHandleClaimJob_ReturnsJob(t *testing.T) {
 	s := store.NewMemoryStore()
 	id := s.AddJob(context.Background(), "echo hello", nil)
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 
 	r := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
 	w := httptest.NewRecorder()
@@ -199,7 +200,7 @@ func TestHandleClaimJob_NoJobs(t *testing.T) {
 func TestHandleClaimJob_SkipsRunningJobs(t *testing.T) {
 	s := store.NewMemoryStore()
 	s.AddJob(context.Background(), "echo first", nil)
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 
 	// Claim the only job
 	r1 := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
@@ -227,7 +228,7 @@ func TestHandleJobDone_Success(t *testing.T) {
 	// Claim the job first so it's in running state
 	s.ClaimJob(context.Background())
 
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/done", nil)
 	w := httptest.NewRecorder()
 
@@ -258,7 +259,7 @@ func TestHandleJobDone_NotFound(t *testing.T) {
 func TestHandleJobDone_NotRunning(t *testing.T) {
 	s := store.NewMemoryStore()
 	id := s.AddJob(context.Background(), "echo hello", nil) // status is pending, not running
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/done", nil)
 	w := httptest.NewRecorder()
@@ -277,7 +278,7 @@ func TestHandleJobFail_RetriesJob(t *testing.T) {
 	// Claim it (attempt 1 of 3)
 	s.ClaimJob(context.Background())
 
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/fail", nil)
 	w := httptest.NewRecorder()
 
@@ -307,7 +308,7 @@ func TestHandleJobFail_PermanentFailure(t *testing.T) {
 	}
 
 	// Now attempts == 3 == maxRetries, job is running
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/fail", nil)
 	w := httptest.NewRecorder()
 
@@ -329,7 +330,7 @@ func TestHandleHeartbeat_Success(t *testing.T) {
 	id := s.AddJob(context.Background(), "echo hello", nil)
 	s.ClaimJob(context.Background()) // move to running
 
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/heartbeat", nil)
 	w := httptest.NewRecorder()
 
@@ -360,7 +361,7 @@ func TestHandleHeartbeat_NotFound(t *testing.T) {
 func TestHandleHeartbeat_NotRunning(t *testing.T) {
 	s := store.NewMemoryStore()
 	id := s.AddJob(context.Background(), "echo hello", nil) // status is pending, not running
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/heartbeat", nil)
 	w := httptest.NewRecorder()
@@ -377,7 +378,7 @@ func TestHandleHeartbeat_NotRunning(t *testing.T) {
 func TestHandleSubmitJob_WithDependencies(t *testing.T) {
 	s := store.NewMemoryStore()
 	depID := s.AddJob(context.Background(), "echo dep", nil)
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 
 	body := bytes.NewBufferString(`{"command": "echo child", "depends_on": ["` + depID + `"]}`)
 	r := httptest.NewRequest(http.MethodPost, "/jobs", body)
@@ -443,7 +444,7 @@ func TestHandleJobDone_UnblocksDownstream(t *testing.T) {
 	s := store.NewMemoryStore()
 	depID := s.AddJob(context.Background(), "echo dep", nil)
 	childID := s.AddJob(context.Background(), "echo child", []string{depID})
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 
 	// Claim and complete the dependency via HTTP.
 	claimReq := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
@@ -491,7 +492,7 @@ func TestHandleJobDone_DoesNotUnblockPartialDeps(t *testing.T) {
 	dep1 := s.AddJob(context.Background(), "echo a", nil)
 	dep2 := s.AddJob(context.Background(), "echo b", nil)
 	childID := s.AddJob(context.Background(), "echo child", []string{dep1, dep2})
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 
 	// Claim both so we can complete just one.
 	s.ClaimJob(context.Background())
@@ -515,7 +516,7 @@ func TestHandleJobDone_DoesNotUnblockPartialDeps(t *testing.T) {
 
 func TestHandlePipeline_EndToEnd(t *testing.T) {
 	s := store.NewMemoryStore()
-	srv := NewServer(s)
+	srv := NewServer(s, slog.Default())
 
 	// Submit step1 via HTTP.
 	body1 := bytes.NewBufferString(`{"command": "echo step1"}`)
