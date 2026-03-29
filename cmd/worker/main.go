@@ -23,7 +23,7 @@ func main() {
 	flag.Parse()
 
 	// Create the HTTP client that talks to the scheduler
-	client := worker.NewSchedulerClient(*schedulerURL)
+	client := worker.NewSchedulerClient(*schedulerURL, slog.Default())
 
 	// Context for graceful shutdown, canceled when OS signal is received
 	ctx, cancel := context.WithCancel(context.Background())
@@ -33,7 +33,7 @@ func main() {
 	var wg sync.WaitGroup
 	for i := 1; i <= *numWorkers; i++ {
 		wg.Add(1)
-		w := worker.NewWorker(i, client)
+		w := worker.NewWorker(i, client, slog.Default())
 		go func() {
 			defer wg.Done()
 			w.Start(ctx)

@@ -76,7 +76,7 @@ func main() {
 	if *mode == "standalone" {
 		for i := 1; i <= *numWorkers; i++ {
 			wg.Add(1)
-			w := worker.NewWorker(i, s)
+			w := worker.NewWorker(i, s, slog.Default())
 			go func() {
 				defer wg.Done()
 				w.Start(ctx)
