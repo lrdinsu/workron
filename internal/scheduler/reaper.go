@@ -2,7 +2,7 @@ package scheduler
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/lrdinsu/workron/internal/store"
@@ -18,26 +18,26 @@ const (
 // re-queues them (if retries remain) or marks them permanently failed.
 // It also calls UnblockReady on each tick as a safety net for DAG
 // dependencies that may not have been unblocked through the HTTP handler.
-func StartReaper(ctx context.Context, s store.JobStore) {
+func StartReaper(ctx context.Context, s store.JobStore, logger *slog.Logger) {
 	ticker := time.NewTicker(reapInterval)
 	defer ticker.Stop()
 
-	log.Println("[reaper] started")
+	logger.Info("reaper started")
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[reaper] shutting down")
+			logger.Info("reaper shutting down")
 			return
 		case <-ticker.C:
-			reap(ctx, s)
+			reap(ctx, s, logger)
 			s.UnblockReady(ctx)
 		}
 	}
 }
 
 // reap scans running jobs and re-queues or fails any with stale heartbeats.
-func reap(ctx context.Context, s store.JobStore) {
+func reap(ctx context.Context, s store.JobStore, logger *slog.Logger) {
 	now := time.Now()
 	for _, job := range s.ListRunningJobs(ctx) {
 		// Use heartbeat if available, otherwise fall back to when the job was claimed
@@ -52,10 +52,10 @@ func reap(ctx context.Context, s store.JobStore) {
 
 		// No heartbeat at all, or heartbeat is stale: the worker is assumed dead
 		if job.Attempts < job.MaxRetries {
-			log.Printf("[reaper] job %s has stale heartbeat, re-queuing (attempt %d/%d)", job.ID, job.Attempts, job.MaxRetries)
+			logger.Warn("stale heartbeat, re-queuing", "job_id", job.ID, "attempt", job.Attempts, "max_retries", job.MaxRetries)
 			s.UpdateJobStatus(ctx, job.ID, store.StatusPending)
 		} else {
-			log.Printf("[reaper] job %s has stale heartbeat, marking failed after %d attempts", job.ID, job.Attempts)
+			logger.Error("stale heartbeat, marking failed", "job_id", job.ID, "attempt", job.Attempts)
 			s.UpdateJobStatus(ctx, job.ID, store.StatusFailed)
 		}
 	}

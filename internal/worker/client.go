@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/lrdinsu/workron/internal/store"
@@ -15,13 +15,15 @@ import (
 type SchedulerClient struct {
 	baseURL    string
 	httpClient *http.Client
+	logger     *slog.Logger
 }
 
 // NewSchedulerClient creates a client pointing at the given scheduler URL.
-func NewSchedulerClient(baseURL string) *SchedulerClient {
+func NewSchedulerClient(baseURL string, logger *slog.Logger) *SchedulerClient {
 	return &SchedulerClient{
 		baseURL:    baseURL,
 		httpClient: &http.Client{},
+		logger:     logger,
 	}
 }
 
@@ -40,7 +42,7 @@ func (c *SchedulerClient) ClaimJob(ctx context.Context) (*store.Job, bool) {
 
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Printf("[client] failed to close response body: %v", closeErr)
+			c.logger.Error("failed to close response body", "error", closeErr)
 		}
 	}()
 
@@ -74,7 +76,7 @@ func (c *SchedulerClient) ReportDone(ctx context.Context, id string) error {
 
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Printf("[client] failed to close response body: %v", closeErr)
+			c.logger.Error("failed to close response body", "error", closeErr)
 		}
 	}()
 
@@ -99,7 +101,7 @@ func (c *SchedulerClient) ReportFail(ctx context.Context, id string) error {
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Printf("[client] failed to close response body: %v", closeErr)
+			c.logger.Error("failed to close response body", "error", closeErr)
 		}
 	}()
 
@@ -127,7 +129,7 @@ func (c *SchedulerClient) UpdateJobStatus(ctx context.Context, id string, status
 
 	if err != nil {
 		// Log but don't crash, the scheduler will eventually time out the job
-		fmt.Printf("[client] warning: %v\n", err)
+		c.logger.Warn("failed to report job status", "error", err)
 	}
 }
 
@@ -145,7 +147,7 @@ func (c *SchedulerClient) SendHeartbeat(ctx context.Context, id string) error {
 
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Printf("[client] failed to close response body: %v", closeErr)
+			c.logger.Error("failed to close response body", "error", closeErr)
 		}
 	}()
 

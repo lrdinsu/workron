@@ -2,7 +2,7 @@ package scheduler
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/lrdinsu/workron/internal/store"
@@ -10,15 +10,17 @@ import (
 
 // Server holds the HTTP mux and the job store
 type Server struct {
-	store store.JobStore
-	mux   *http.ServeMux
+	store  store.JobStore
+	mux    *http.ServeMux
+	logger *slog.Logger
 }
 
 // NewServer creates a new Server and registers all routes
-func NewServer(s store.JobStore) *Server {
+func NewServer(s store.JobStore, logger *slog.Logger) *Server {
 	srv := &Server{
-		store: s,
-		mux:   http.NewServeMux(),
+		store:  s,
+		mux:    http.NewServeMux(),
+		logger: logger,
 	}
 	srv.registerRoutes()
 	return srv
@@ -74,8 +76,8 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	id := s.store.AddJob(ctx, req.Command, req.DependsOn)
 	job, _ := s.store.GetJob(ctx, id)
 
-	log.Printf("[server] job %s submitted: %q (depends_on: %v)", id, req.Command, req.DependsOn)
-	writeJSON(w, http.StatusCreated, job)
+	s.logger.Info("job submitted", "job_id", id, "command", req.Command, "depends_on", req.DependsOn)
+	s.writeJSON(w, http.StatusCreated, job)
 }
 
 // handleGetJob handles GET /jobs/{id}
@@ -88,13 +90,13 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, job)
+	s.writeJSON(w, http.StatusOK, job)
 }
 
 // handleListJobs handles GET /jobs
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	jobs := s.store.ListJobs(r.Context())
-	writeJSON(w, http.StatusOK, jobs)
+	s.writeJSON(w, http.StatusOK, jobs)
 }
 
 // handleClaimJob handles GET /jobs/next
@@ -107,8 +109,8 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[server] job %s claimed by remote worker", job.ID)
-	writeJSON(w, http.StatusOK, job)
+	s.logger.Info("job claimed", "job_id", job.ID)
+	s.writeJSON(w, http.StatusOK, job)
 }
 
 // handleJobDone handles POST /jobs/{id}/done
@@ -132,7 +134,7 @@ func (s *Server) handleJobDone(w http.ResponseWriter, r *http.Request) {
 
 	s.store.UpdateJobStatus(ctx, id, store.StatusDone)
 	s.store.UnblockReady(ctx)
-	log.Printf("[server] job %s marked done", id)
+	s.logger.Info("job done", "job_id", id)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -155,10 +157,10 @@ func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 
 	// Retry logic: if attempts haven't been exhausted, re-queue as pending
 	if job.Attempts < job.MaxRetries {
-		log.Printf("[server] job %s failed (attempt %d/%d), re-queuing", id, job.Attempts, job.MaxRetries)
+		s.logger.Warn("job failed, re-queuing", "job_id", id, "attempt", job.Attempts, "max_retries", job.MaxRetries)
 		s.store.UpdateJobStatus(ctx, id, store.StatusPending)
 	} else {
-		log.Printf("[server] job %s failed permanently after %d attempts", id, job.Attempts)
+		s.logger.Error("job failed permanently", "job_id", id, "attempt", job.Attempts)
 		s.store.UpdateJobStatus(ctx, id, store.StatusFailed)
 	}
 
@@ -186,11 +188,11 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// writeJSON is a helper that encodes v as JSON and writes it to w
-func writeJSON(w http.ResponseWriter, status int, v any) {
+// writeJSON encodes v as JSON and writes it to w
+func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("[server] failed to encode response: %v", err)
+		s.logger.Error("failed to encode response", "error", err)
 	}
 }
