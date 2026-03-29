@@ -66,10 +66,10 @@ func main() {
 	}
 
 	// Initialize the server
-	srv := scheduler.NewServer(s)
+	srv := scheduler.NewServer(s, slog.Default())
 
 	// Start the heartbeat reaper to detect dead workers
-	go scheduler.StartReaper(ctx, s)
+	go scheduler.StartReaper(ctx, s, slog.Default())
 
 	// Only start local workers in standalone mode
 	var wg sync.WaitGroup
