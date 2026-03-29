@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -36,7 +37,7 @@ func TestWorker_ProcessesJobSuccessfully(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	w := NewWorker(1, s)
+	w := NewWorker(1, s, slog.Default())
 	go w.Start(ctx)
 
 	waitForStatus(t, s, id, store.StatusDone, 3*time.Second)
@@ -49,7 +50,7 @@ func TestWorker_MarksFailedJob(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	w := NewWorker(1, s)
+	w := NewWorker(1, s, slog.Default())
 	go w.Start(ctx)
 
 	// Job should eventually be permanently failed after all retries exhausted
@@ -63,7 +64,7 @@ func TestWorker_RetriesFailedJobBeforeGivingUp(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	w := NewWorker(1, s)
+	w := NewWorker(1, s, slog.Default())
 	go w.Start(ctx)
 
 	waitForStatus(t, s, id, store.StatusFailed, 5*time.Second)
@@ -88,7 +89,7 @@ func TestWorker_DoesNotRetryJobThatSucceeds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	w := NewWorker(1, s)
+	w := NewWorker(1, s, slog.Default())
 	go w.Start(ctx)
 
 	waitForStatus(t, s, id, store.StatusDone, 3*time.Second)
@@ -108,7 +109,7 @@ func TestWorker_StopsOnContextCancel(t *testing.T) {
 	s := store.NewMemoryStore()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	w := NewWorker(1, s)
+	w := NewWorker(1, s, slog.Default())
 
 	done := make(chan struct{})
 	go func() {
@@ -141,7 +142,7 @@ func TestWorker_MultipleWorkerNoDuplicates(t *testing.T) {
 
 	// Start 3 workers competing for 5 jobs
 	for i := 1; i <= 3; i++ {
-		w := NewWorker(i, s)
+		w := NewWorker(i, s, slog.Default())
 		go w.Start(ctx)
 	}
 
@@ -176,7 +177,7 @@ func TestWorker_SendsHeartbeatsDuringLongJob(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	w := NewWorker(1, s)
+	w := NewWorker(1, s, slog.Default())
 	go w.Start(ctx)
 
 	// Wait long enough for at least 2 heartbeats (an interval is 5s)
@@ -205,7 +206,7 @@ func TestWorker_HeartbeatStopsAfterJobCompletes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	w := NewWorker(1, s)
+	w := NewWorker(1, s, slog.Default())
 	go w.Start(ctx)
 
 	waitForStatus(t, s, id, store.StatusDone, 3*time.Second)

@@ -17,7 +17,7 @@ func newTestScheduler(t *testing.T) (*SchedulerClient, *store.MemoryStore, func(
 	s := store.NewMemoryStore()
 	srv := scheduler.NewServer(s, slog.Default())
 	ts := httptest.NewServer(srv)
-	client := NewSchedulerClient(ts.URL)
+	client := NewSchedulerClient(ts.URL, slog.Default())
 	return client, s, ts.Close
 }
 
