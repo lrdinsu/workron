@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,6 +17,10 @@ import (
 )
 
 func main() {
+	// Configure structured JSON logging as the global default.
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	// Parse CLI flags
 	mode := flag.String("mode", "scheduler", "scheduler (HTTP API only) | standalone (API + local workers)")
 	port := flag.Int("port", 8080, "port to listen on")
@@ -32,29 +36,33 @@ func main() {
 	switch *dbDriver {
 	case "postgres":
 		if *dbURL == "" {
-			log.Fatal("[main] --db-url is required for postgres driver")
+			slog.Error("--db-url is required for postgres driver")
+			os.Exit(1)
 		}
 		pgStore, err := store.NewPostgresStore(ctx, *dbURL, 10)
 		if err != nil {
-			log.Fatalf("[main] failed to connect to PostgreSQL: %v", err)
+			slog.Error("failed to connect to PostgreSQL", "error", err)
+			os.Exit(1)
 		}
 		defer pgStore.Close()
 		s = pgStore
-		log.Printf("[main] using PostgreSQL store")
+		slog.Info("using PostgreSQL store")
 	case "sqlite":
 		if *dbURL == "" {
-			log.Fatal("[main] --db-url is required for sqlite driver")
+			slog.Error("--db-url is required for sqlite driver")
+			os.Exit(1)
 		}
 		sqliteStore, err := store.NewSQLiteStore(*dbURL)
 		if err != nil {
-			log.Fatalf("[main] failed to open SQLite database: %v", err)
+			slog.Error("failed to open SQLite database", "error", err)
+			os.Exit(1)
 		}
 		defer func() { _ = sqliteStore.Close() }()
 		s = sqliteStore
-		log.Printf("[main] using SQLite store: %s", *dbURL)
+		slog.Info("using SQLite store", "db_url", *dbURL)
 	default:
 		s = store.NewMemoryStore()
-		log.Println("[main] using in-memory store")
+		slog.Info("using in-memory store")
 	}
 
 	// Initialize the server
@@ -74,9 +82,9 @@ func main() {
 				w.Start(ctx)
 			}()
 		}
-		log.Printf("[main] standalone mode: started %d local workers", *numWorkers)
+		slog.Info("started local workers", "mode", "standalone", "count", *numWorkers)
 	} else {
-		log.Println("[main] scheduler mode: waiting for remote workers")
+		slog.Info("waiting for remote workers", "mode", "scheduler")
 	}
 
 	// Start HTTP server in a goroutine so it doesn't block signal handling
@@ -87,9 +95,9 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("[main] scheduler listening on %s", addr)
+		slog.Info("scheduler listening", "addr", addr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[main] server error: %v", err)
+			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
 	}()
@@ -99,11 +107,11 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("[main] shutdown signal received")
+	slog.Info("shutdown signal received")
 
 	// Stop accepting new HTTP requests
 	if err := httpServer.Shutdown(context.Background()); err != nil {
-		log.Printf("[main] http server shutdown error: %v", err)
+		slog.Error("http server shutdown error", "error", err)
 	}
 
 	// Cancel context to signal all workers to stop
@@ -111,5 +119,5 @@ func main() {
 
 	// Wait for all workers to finish their current job
 	wg.Wait()
-	log.Println("[main] all workers stopped, goodbye")
+	slog.Info("all workers stopped, goodbye")
 }

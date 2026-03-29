@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
@@ -13,6 +13,10 @@ import (
 )
 
 func main() {
+	// Configure structured JSON logging as the global default.
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	// Parse CLI flags
 	schedulerURL := flag.String("scheduler", "http://localhost:8080", "scheduler base URL")
 	numWorkers := flag.Int("workers", 3, "number of concurrent worker goroutines")
@@ -35,19 +39,19 @@ func main() {
 			w.Start(ctx)
 		}()
 	}
-	log.Printf("[main] started %d workers, scheduler=%s", *numWorkers, *schedulerURL)
+	slog.Info("started workers", "count", *numWorkers, "scheduler", *schedulerURL)
 
 	// Block until SIGINT or SIGTERM is received
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("[main] shutdown signal received")
+	slog.Info("shutdown signal received")
 
 	// Cancel context to signal all workers to stop
 	cancel()
 
 	// Wait for all workers to finish their current job
 	wg.Wait()
-	log.Println("[main] all workers stopped, goodbye")
+	slog.Info("all workers stopped, goodbye")
 }
