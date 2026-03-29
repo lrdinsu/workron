@@ -2,7 +2,7 @@ package worker
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/lrdinsu/workron/internal/store"
@@ -24,21 +24,24 @@ type Worker struct {
 	id       int
 	source   JobSource
 	executor *Executor
+	logger   *slog.Logger
 }
 
 // NewWorker creates a new Worker with the given ID and job source.
-func NewWorker(id int, source JobSource) *Worker {
+// The logger is decorated with worker_id so every log line identifies this worker.
+func NewWorker(id int, source JobSource, logger *slog.Logger) *Worker {
 	return &Worker{
 		id:       id,
 		source:   source,
 		executor: NewExecutor(),
+		logger:   logger.With("worker_id", id),
 	}
 }
 
 // Start begins the worker's polling loop.
 // It blocks until the context is canceled, at which point it finishes any in-progress job and returns.
 func (w *Worker) Start(ctx context.Context) {
-	log.Printf("[worker-%d] started", w.id)
+	w.logger.Info("worker started")
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -48,7 +51,7 @@ func (w *Worker) Start(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			// Context was canceled, scheduler is shutting down
-			log.Printf("[worker-%d] shutting down", w.id)
+			w.logger.Info("worker shutting down")
 			return
 		default:
 		}
@@ -62,7 +65,7 @@ func (w *Worker) Start(ctx context.Context) {
 		// No pending jobs, wait for the next tick or context cancellation
 		select {
 		case <-ctx.Done():
-			log.Printf("[worker-%d] shutting down", w.id)
+			w.logger.Info("worker shutting down")
 			return
 		case <-ticker.C:
 		}
@@ -74,7 +77,7 @@ func (w *Worker) Start(ctx context.Context) {
 // If running in-process (store.JobStore), the worker handles retries directly.
 // If running over HTTP (SchedulerClient), the scheduler handles retry decisions.
 func (w *Worker) process(ctx context.Context, job *store.Job) {
-	log.Printf("[worker-%d] picking up job %s (attempt %d/%d): %q", w.id, job.ID, job.Attempts, job.MaxRetries, job.Command)
+	w.logger.Info("job picked up", "job_id", job.ID, "attempt", job.Attempts, "max_retries", job.MaxRetries, "command", job.Command)
 
 	// Start a heartbeat goroutine, canceled when the job finishes
 	hbCtx, hbCancel := context.WithCancel(ctx)
@@ -84,17 +87,17 @@ func (w *Worker) process(ctx context.Context, job *store.Job) {
 	err := w.executor.Execute(job.Command)
 	if err != nil {
 		if job.Attempts < job.MaxRetries {
-			log.Printf("[worker-%d] job %s failed, retrying (attempt %d/%d): %v", w.id, job.ID, job.Attempts, job.MaxRetries, err)
+			w.logger.Warn("job failed, retrying", "job_id", job.ID, "attempt", job.Attempts, "max_retries", job.MaxRetries, "error", err)
 			w.source.UpdateJobStatus(ctx, job.ID, store.StatusPending)
 			return
 		}
 
-		log.Printf("[worker-%d] job %s failed permanently after %d attempts: %v", w.id, job.ID, job.Attempts, err)
+		w.logger.Error("job failed permanently", "job_id", job.ID, "attempt", job.Attempts, "error", err)
 		w.source.UpdateJobStatus(ctx, job.ID, store.StatusFailed)
 		return
 	}
 
-	log.Printf("[worker-%d] job %s done", w.id, job.ID)
+	w.logger.Info("job done", "job_id", job.ID)
 	w.source.UpdateJobStatus(ctx, job.ID, store.StatusDone)
 }
 
@@ -110,7 +113,7 @@ func (w *Worker) sendHeartbeats(ctx context.Context, jobID string) {
 			return
 		case <-ticker.C:
 			if err := w.source.SendHeartbeat(ctx, jobID); err != nil {
-				log.Printf("[worker-%d] heartbeat failed for job %s: %v", w.id, jobID, err)
+				w.logger.Warn("heartbeat failed", "job_id", jobID, "error", err)
 			}
 		}
 	}
