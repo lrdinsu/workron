@@ -11,9 +11,12 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/lrdinsu/workron/internal/metrics"
 	"github.com/lrdinsu/workron/internal/scheduler"
 	"github.com/lrdinsu/workron/internal/store"
 	"github.com/lrdinsu/workron/internal/worker"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 )
 
 func main() {
@@ -65,11 +68,20 @@ func main() {
 		slog.Info("using in-memory store")
 	}
 
+	// Initialize Prometheus metrics and registry.
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	registry.MustRegister(collectors.NewGoCollector())
+
+	m := metrics.NewMetrics()
+	m.Register(registry)
+	registry.MustRegister(metrics.NewJobGaugeCollector(s))
+
 	// Initialize the server
-	srv := scheduler.NewServer(s, slog.Default())
+	srv := scheduler.NewServer(s, slog.Default(), m, registry)
 
 	// Start the heartbeat reaper to detect dead workers
-	go scheduler.StartReaper(ctx, s, slog.Default())
+	go scheduler.StartReaper(ctx, s, slog.Default(), m)
 
 	// Only start local workers in standalone mode
 	var wg sync.WaitGroup

@@ -6,8 +6,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/lrdinsu/workron/internal/metrics"
 	"github.com/lrdinsu/workron/internal/scheduler"
 	"github.com/lrdinsu/workron/internal/store"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // newTestScheduler starts a httptest server backed by a real scheduler + memory store.
@@ -15,7 +17,7 @@ import (
 func newTestScheduler(t *testing.T) (*SchedulerClient, *store.MemoryStore, func()) {
 	t.Helper()
 	s := store.NewMemoryStore()
-	srv := scheduler.NewServer(s, slog.Default())
+	srv := scheduler.NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry())
 	ts := httptest.NewServer(srv)
 	client := NewSchedulerClient(ts.URL, slog.Default())
 	return client, s, ts.Close

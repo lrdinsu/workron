@@ -5,22 +5,29 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/lrdinsu/workron/internal/metrics"
 	"github.com/lrdinsu/workron/internal/store"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Server holds the HTTP mux and the job store
 type Server struct {
-	store  store.JobStore
-	mux    *http.ServeMux
-	logger *slog.Logger
+	store    store.JobStore
+	mux      *http.ServeMux
+	logger   *slog.Logger
+	metrics  *metrics.Metrics
+	registry *prometheus.Registry
 }
 
 // NewServer creates a new Server and registers all routes
-func NewServer(s store.JobStore, logger *slog.Logger) *Server {
+func NewServer(s store.JobStore, logger *slog.Logger, m *metrics.Metrics, registry *prometheus.Registry) *Server {
 	srv := &Server{
-		store:  s,
-		mux:    http.NewServeMux(),
-		logger: logger,
+		store:    s,
+		mux:      http.NewServeMux(),
+		logger:   logger,
+		metrics:  m,
+		registry: registry,
 	}
 	srv.registerRoutes()
 	return srv
@@ -40,6 +47,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /jobs/{id}/done", s.handleJobDone)
 	s.mux.HandleFunc("POST /jobs/{id}/fail", s.handleJobFail)
 	s.mux.HandleFunc("POST /jobs/{id}/heartbeat", s.handleHeartbeat)
+	s.mux.Handle("GET /metrics", promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
 }
 
 // submitJobRequest is the expected JSON body for POST /jobs
@@ -76,6 +84,7 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	id := s.store.AddJob(ctx, req.Command, req.DependsOn)
 	job, _ := s.store.GetJob(ctx, id)
 
+	s.metrics.JobsSubmitted.Inc()
 	s.logger.Info("job submitted", "job_id", id, "command", req.Command, "depends_on", req.DependsOn)
 	s.writeJSON(w, http.StatusCreated, job)
 }
@@ -109,6 +118,10 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.metrics.JobsClaimed.Inc()
+	if job.StartedAt != nil {
+		s.metrics.JobQueueWait.Observe(job.StartedAt.Sub(job.CreatedAt).Seconds())
+	}
 	s.logger.Info("job claimed", "job_id", job.ID)
 	s.writeJSON(w, http.StatusOK, job)
 }
@@ -134,6 +147,14 @@ func (s *Server) handleJobDone(w http.ResponseWriter, r *http.Request) {
 
 	s.store.UpdateJobStatus(ctx, id, store.StatusDone)
 	s.store.UnblockReady(ctx)
+
+	// Record execution duration from timestamps.
+	updatedJob, _ := s.store.GetJob(ctx, id)
+	if updatedJob.StartedAt != nil && updatedJob.DoneAt != nil {
+		s.metrics.JobExecDuration.Observe(updatedJob.DoneAt.Sub(*updatedJob.StartedAt).Seconds())
+	}
+
+	s.metrics.JobsCompleted.Inc()
 	s.logger.Info("job done", "job_id", id)
 	w.WriteHeader(http.StatusOK)
 }
@@ -159,9 +180,11 @@ func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 	if job.Attempts < job.MaxRetries {
 		s.logger.Warn("job failed, re-queuing", "job_id", id, "attempt", job.Attempts, "max_retries", job.MaxRetries)
 		s.store.UpdateJobStatus(ctx, id, store.StatusPending)
+		s.metrics.JobsRetried.Inc()
 	} else {
 		s.logger.Error("job failed permanently", "job_id", id, "attempt", job.Attempts)
 		s.store.UpdateJobStatus(ctx, id, store.StatusFailed)
+		s.metrics.JobsFailed.Inc()
 	}
 
 	w.WriteHeader(http.StatusOK)

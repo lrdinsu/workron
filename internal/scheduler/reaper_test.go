@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lrdinsu/workron/internal/metrics"
 	"github.com/lrdinsu/workron/internal/store"
 )
 
@@ -17,7 +18,7 @@ func TestReap_RequeuesStaleJob(t *testing.T) {
 
 	s.SetLastHeartbeat(id, time.Now().Add(-60*time.Second))
 
-	reap(ctx, s, slog.Default())
+	reap(ctx, s, slog.Default(), metrics.NewMetrics())
 
 	job, _ := s.GetJob(ctx, id)
 	if job.Status != store.StatusPending {
@@ -40,7 +41,7 @@ func TestReap_FailsJobWithExhaustedRetries(t *testing.T) {
 
 	s.SetLastHeartbeat(id, time.Now().Add(-60*time.Second))
 
-	reap(ctx, s, slog.Default())
+	reap(ctx, s, slog.Default(), metrics.NewMetrics())
 
 	job, _ := s.GetJob(ctx, id)
 	if job.Status != store.StatusFailed {
@@ -55,7 +56,7 @@ func TestReap_IgnoresHealthyJob(t *testing.T) {
 	s.ClaimJob(ctx)
 	s.UpdateHeartbeat(ctx, id) // fresh heartbeat
 
-	reap(ctx, s, slog.Default())
+	reap(ctx, s, slog.Default(), metrics.NewMetrics())
 
 	job, _ := s.GetJob(ctx, id)
 	if job.Status != store.StatusRunning {
@@ -75,7 +76,7 @@ func TestReap_IgnoresPendingAndDoneJobs(t *testing.T) {
 	s.UpdateJobStatus(ctx, id1, store.StatusDone)
 	s.UpdateJobStatus(ctx, id2, store.StatusDone)
 
-	reap(ctx, s, slog.Default())
+	reap(ctx, s, slog.Default(), metrics.NewMetrics())
 
 	// Neither should be affected, ListRunningJobs returns nothing
 	for _, id := range []string{id1, id2} {
@@ -93,7 +94,7 @@ func TestReap_RequeuesJobWithNilHeartbeat(t *testing.T) {
 	s.ClaimJob(ctx) // running, no heartbeat, but StartedAt is now
 
 	// With a fresh StartedAt, reaper should leave it alone
-	reap(ctx, s, slog.Default())
+	reap(ctx, s, slog.Default(), metrics.NewMetrics())
 
 	job, _ := s.GetJob(ctx, id)
 	if job.Status != store.StatusRunning {
@@ -107,7 +108,7 @@ func TestStartReaper_StopsOnContextCancel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		StartReaper(ctx, s, slog.Default())
+		StartReaper(ctx, s, slog.Default(), metrics.NewMetrics())
 		close(done)
 	}()
 
@@ -130,7 +131,7 @@ func TestReap_RequeuesJobWithNilHeartbeatAndStaleStart(t *testing.T) {
 	// Simulate a job that was claimed 60 seconds ago but never sent a heartbeat
 	s.SetStartedAt(id, time.Now().Add(-60*time.Second))
 
-	reap(ctx, s, slog.Default())
+	reap(ctx, s, slog.Default(), metrics.NewMetrics())
 
 	job, _ := s.GetJob(ctx, id)
 	if job.Status != store.StatusPending {
