@@ -1,15 +1,22 @@
 package scheduler
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/lrdinsu/workron/internal/metrics"
 	"github.com/lrdinsu/workron/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// contextKey is an unexported type for context keys in this package.
+type contextKey string
+
+const loggerKey contextKey = "logger"
 
 // Server holds the HTTP mux and the job store
 type Server struct {
@@ -33,9 +40,32 @@ func NewServer(s store.JobStore, logger *slog.Logger, m *metrics.Metrics, regist
 	return srv
 }
 
-// ServeHTTP implements http.Handler so the Server can be passed to http.ListenAndServe
+// ServeHTTP implements http.Handler. It generates a unique request ID,
+// creates a request-scoped logger with that ID, and sets the X-Request-ID
+// response header before delegating to the mux.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	requestID := uuid.New().String()
+
+	// Create a child logger that includes request_id on every log line.
+	logger := s.logger.With("request_id", requestID)
+
+	// Store the logger in context so handlers can retrieve it.
+	ctx := context.WithValue(r.Context(), loggerKey, logger)
+
+	// Set response header so clients can trace their request.
+	w.Header().Set("X-Request-ID", requestID)
+
+	s.mux.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// requestLogger extracts the request-scoped logger from context.
+// Falls back to the server's base logger if not present (e.g., in tests
+// that call handlers directly without going through ServeHTTP).
+func (s *Server) requestLogger(ctx context.Context) *slog.Logger {
+	if logger, ok := ctx.Value(loggerKey).(*slog.Logger); ok {
+		return logger
+	}
+	return s.logger
 }
 
 // registerRoutes wires up all HTTP endpoints
@@ -61,6 +91,8 @@ type submitJobRequest struct {
 // Returns: the created job as JSON (201)
 // Returns 400 if command is empty, dependencies are missing, or a cycle is detected.
 func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
+	logger := s.requestLogger(r.Context())
+
 	var req submitJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -85,7 +117,7 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	job, _ := s.store.GetJob(ctx, id)
 
 	s.metrics.JobsSubmitted.Inc()
-	s.logger.Info("job submitted", "job_id", id, "command", req.Command, "depends_on", req.DependsOn)
+	logger.Info("job submitted", "job_id", id, "command", req.Command, "depends_on", req.DependsOn)
 	s.writeJSON(w, http.StatusCreated, job)
 }
 
@@ -112,6 +144,8 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 // Atomically claims one pending job and returns it to the calling worker.
 // Returns 204 No Content if no jobs are available.
 func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
+	logger := s.requestLogger(r.Context())
+
 	job, found := s.store.ClaimJob(r.Context())
 	if !found {
 		w.WriteHeader(http.StatusNoContent)
@@ -122,7 +156,7 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 	if job.StartedAt != nil {
 		s.metrics.JobQueueWait.Observe(job.StartedAt.Sub(job.CreatedAt).Seconds())
 	}
-	s.logger.Info("job claimed", "job_id", job.ID)
+	logger.Info("job claimed", "job_id", job.ID)
 	s.writeJSON(w, http.StatusOK, job)
 }
 
@@ -131,6 +165,7 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 // After marking the job done, unblocks any downstream jobs whose
 // dependencies are now fully satisfied.
 func (s *Server) handleJobDone(w http.ResponseWriter, r *http.Request) {
+	logger := s.requestLogger(r.Context())
 	id := r.PathValue("id")
 	ctx := r.Context()
 
@@ -155,13 +190,14 @@ func (s *Server) handleJobDone(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.metrics.JobsCompleted.Inc()
-	s.logger.Info("job done", "job_id", id)
+	logger.Info("job done", "job_id", id)
 	w.WriteHeader(http.StatusOK)
 }
 
 // handleJobFail handles POST /jobs/{id}/fail
 // Worker reports that a job failed. The scheduler decides whether to retry.
 func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
+	logger := s.requestLogger(r.Context())
 	id := r.PathValue("id")
 	ctx := r.Context()
 
@@ -178,11 +214,11 @@ func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 
 	// Retry logic: if attempts haven't been exhausted, re-queue as pending
 	if job.Attempts < job.MaxRetries {
-		s.logger.Warn("job failed, re-queuing", "job_id", id, "attempt", job.Attempts, "max_retries", job.MaxRetries)
+		logger.Warn("job failed, re-queuing", "job_id", id, "attempt", job.Attempts, "max_retries", job.MaxRetries)
 		s.store.UpdateJobStatus(ctx, id, store.StatusPending)
 		s.metrics.JobsRetried.Inc()
 	} else {
-		s.logger.Error("job failed permanently", "job_id", id, "attempt", job.Attempts)
+		logger.Error("job failed permanently", "job_id", id, "attempt", job.Attempts)
 		s.store.UpdateJobStatus(ctx, id, store.StatusFailed)
 		s.metrics.JobsFailed.Inc()
 	}
