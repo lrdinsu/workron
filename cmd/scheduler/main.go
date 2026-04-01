@@ -84,6 +84,9 @@ func main() {
 	go scheduler.StartReaper(ctx, s, slog.Default(), m)
 
 	// Only start local workers in standalone mode
+	// Note: in standalone mode, local workers call store methods directly,
+	// bypassing HTTP handlers. Prometheus counters (claimed, completed, etc.)
+	// only increment in distributed mode where workers go through the API.
 	var wg sync.WaitGroup
 	if *mode == "standalone" {
 		for i := 1; i <= *numWorkers; i++ {
