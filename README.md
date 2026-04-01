@@ -318,7 +318,7 @@ Jobs can declare dependencies on other jobs using the `depends_on` field. This c
 
 **What happens when a dependency fails?**
 
-Currently, if a dependency fails permanently, downstream jobs remain `blocked` indefinitely. This is a known limitation — a future improvement would cascade the failure or provide a way to manually unblock or cancel downstream jobs.
+Currently, if a dependency fails permanently, downstream jobs remain `blocked` indefinitely. This is a known limitation, and a future improvement would cascade the failure or provide a way to manually unblock or cancel downstream jobs.
 
 ---
 
@@ -422,6 +422,20 @@ workron/
 | PostgreSQL driver | `jackc/pgx/v5` (native pgxpool, no database/sql) |
 | ID generation | `google/uuid` (UUID v4) |
 | Local dev | Docker Compose (PostgreSQL 16) |
+
+---
+
+## Key Technical Decisions
+
+**PostgreSQL advisory locks over Raft for reaper coordination.** When multiple scheduler instances share a database, only one should run the reaper (heartbeat timeout scan) at a time. Instead of adding a full consensus protocol like Raft, the reaper acquires a transaction-scoped advisory lock (`pg_try_advisory_xact_lock`) on each tick. If another instance holds it, the tick is skipped. If the lock holder crashes, PostgreSQL automatically releases the lock when the connection drops. This gives leader election for free, no external coordination service, no Raft state machine, no split-brain risk. PostgreSQL is already the shared coordination layer, so using it for this is simpler and sufficient.
+
+**`FOR UPDATE SKIP LOCKED` over application-level locking.** Multiple workers (or multiple schedulers) claiming jobs concurrently need atomicity. The naive approach is reading a pending job, then updating it, which has a race window where two workers read the same job. Application-level distributed locks (Redis, Zookeeper) add operational complexity. PostgreSQL's `FOR UPDATE SKIP LOCKED` solves this at the database level: when one transaction locks a row, other transactions skip it and move to the next row. Zero contention, zero double-claims, no external dependencies. This is the same pattern used by production job queues like Graphile Worker.
+
+**GPU-aware bin-packing over simple tag filtering.** For ML workload scheduling, simple tag matching ("this worker has a GPU") doesn't prevent over-commitment. If a worker has 24GB VRAM and one job is using 16GB, a naive tag filter would still assign a second 16GB job to the same worker. Resource accounting tracks allocated vs. available capacity per worker, and first-fit-decreasing bin-packing places the largest pending job on the smallest worker that still fits. This is a real scheduling problem in ML infrastructure, the same approach used by Kubernetes resource requests.
+
+**Pull-based scheduling with server-side selection over push-based assignment.** Workers poll `GET /jobs/next?worker_id=xxx` and the scheduler picks the best job for that worker based on its registered resources. The alternative is scheduler pushes jobs to workers, which requires the scheduler to track worker availability in real time and handle push failures. Pull-based is simpler: workers ask when they're ready, the scheduler has a consistent view of what's running where (from the database), and there's no push failure mode to handle.
+
+**Transaction-scoped advisory locks over session-scoped.** `pg_try_advisory_xact_lock` releases automatically when the transaction commits, even if the application crashes before calling unlock. Session-scoped locks (`pg_advisory_lock`) persist until explicitly released or the connection closes, but with connection pooling (pgxpool), a returned connection might carry a stale lock into a different goroutine. Transaction-scoped locks eliminate this entire class of bugs.
 
 ---
 
