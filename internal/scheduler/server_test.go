@@ -611,3 +611,37 @@ func TestHandlePipeline_EndToEnd(t *testing.T) {
 		}
 	}
 }
+
+// --- Request ID tests ---
+
+func TestRequestID_InResponseHeader(t *testing.T) {
+	srv := newTestServer()
+
+	r := httptest.NewRequest(http.MethodGet, "/jobs", nil)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	requestID := w.Header().Get("X-Request-ID")
+	if requestID == "" {
+		t.Error("expected X-Request-ID header, got empty")
+	}
+}
+
+func TestRequestID_UniquePerRequest(t *testing.T) {
+	srv := newTestServer()
+
+	r1 := httptest.NewRequest(http.MethodGet, "/jobs", nil)
+	w1 := httptest.NewRecorder()
+	srv.ServeHTTP(w1, r1)
+
+	r2 := httptest.NewRequest(http.MethodGet, "/jobs", nil)
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, r2)
+
+	id1 := w1.Header().Get("X-Request-ID")
+	id2 := w2.Header().Get("X-Request-ID")
+	if id1 == id2 {
+		t.Errorf("expected unique request IDs, got same: %s", id1)
+	}
+}

@@ -33,10 +33,12 @@ If you are curious about the design decisions and trade-offs behind this project
 - Two deployment modes: standalone (single process) or distributed (separate scheduler + worker binaries over HTTP)
 - Heartbeat-based failure detection: workers send heartbeats every 5 seconds, scheduler re-queues jobs with stale or missing heartbeats after 30 seconds
 - Graceful shutdown: workers finish their current job before exiting
+- Structured JSON logging with `log/slog`: typed key-value fields, log levels, logger injection with `With` for component identity
+- Prometheus metrics: counters for job lifecycle events, histograms for execution duration and queue wait, gauges for current queue state via custom collector
+- Request ID tracing: UUID per HTTP request, `X-Request-ID` response header, request-scoped logger via context
 
 **Planned**
 - [ ] Multi-scheduler coordination (advisory locks for reaper)
-- [ ] Prometheus metrics and structured logging
 - [ ] Job cancellation (with cascading cancel for DAGs)
 - [ ] Configurable retry backoff and per-job timeouts
 - [ ] Backpressure and concurrency control
@@ -293,6 +295,14 @@ curl -X POST http://localhost:8080/jobs/{id}/heartbeat
 
 Workers call this automatically every 5 seconds while processing a job. Returns `200` on success, `404` if job not found, `409` if job is not running.
 
+### Prometheus metrics
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+Returns Prometheus-compatible metrics including `workron_jobs_submitted_total`, `workron_jobs_completed_total`, `workron_job_execution_duration_seconds`, `workron_jobs_pending`, and more.
+
 ---
 
 ## Job Dependencies (DAG)
@@ -324,6 +334,18 @@ This ensures no job gets stuck in `running` forever, even if a worker process is
 
 ---
 
+## Observability
+
+Workron provides three layers of observability:
+
+**Structured logging** (`log/slog`): all log output is JSON with typed fields (`job_id`, `worker_id`, `request_id`, `attempt`, `error`). Log levels distinguish normal events (Info), unusual events like reaper actions (Warn), and failures (Error). Each component receives its logger via dependency injection. Workers use `logger.With("worker_id", id)` so every log line automatically identifies the worker.
+
+**Prometheus metrics** (`GET /metrics`): counters track job lifecycle events (`workron_jobs_submitted_total`, `workron_jobs_claimed_total`, `workron_jobs_completed_total`, `workron_jobs_failed_total`, `workron_jobs_retried_total`, `workron_jobs_reaped_total`). Histograms track execution duration and queue wait time. Gauges report current queue state (`workron_jobs_pending`, `workron_jobs_running`, `workron_jobs_blocked`) via a custom `prometheus.Collector` that queries the store on each scrape.
+
+**Request ID tracing**: every HTTP request receives a UUID, set as the `X-Request-ID` response header and included in all log lines for that request. A request-scoped child logger is created in `ServeHTTP` and propagated to handlers via context, so `request_id` appears automatically without manual threading.
+
+---
+
 ## Persistence
 
 Workron supports three storage backends, selectable at startup via `--db-driver`:
@@ -348,6 +370,10 @@ workron/
 │   └── worker/
 │       └── main.go              # Standalone worker entry point
 ├── internal/
+│   ├── metrics/
+│   │   ├── metrics.go           # Prometheus counters, histograms, registration
+│   │   ├── collector.go         # Custom gauge collector (queries store on scrape)
+│   │   └── metrics_test.go
 │   ├── store/
 │   │   ├── store.go             # JobStore interface, Job struct, JobStatus
 │   │   ├── memory.go            # In-memory store implementation
@@ -389,6 +415,8 @@ workron/
 | Language | Go 1.22+ |
 | HTTP | `net/http` (stdlib only) |
 | Job execution | `os/exec` (stdlib) |
+| Logging | `log/slog` (stdlib, JSON output) |
+| Metrics | `prometheus/client_golang` |
 | Storage | In-memory, SQLite, or PostgreSQL |
 | SQLite driver | `modernc.org/sqlite` (pure Go, no CGo) |
 | PostgreSQL driver | `jackc/pgx/v5` (native pgxpool, no database/sql) |
