@@ -44,6 +44,36 @@ func (s *PostgresStore) Close() {
 	s.pool.Close()
 }
 
+// WithReaperLock uses a PostgreSQL transaction-scoped advisory lock to ensure
+// only one scheduler instance runs the reaper at a time. The lock is held for
+// the duration of fn and automatically released when the transaction commits.
+// Returns (true, nil) if the lock was acquired and fn executed,
+// (false, nil) if another instance holds the lock.
+func (s *PostgresStore) WithReaperLock(ctx context.Context, fn func(ctx context.Context)) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin reaper lock tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var acquired bool
+	err = tx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock($1)", int64(1)).Scan(&acquired)
+	if err != nil {
+		return false, fmt.Errorf("try advisory lock: %w", err)
+	}
+
+	if !acquired {
+		return false, nil
+	}
+
+	fn(ctx)
+
+	if err := tx.Commit(ctx); err != nil {
+		return true, fmt.Errorf("commit reaper lock tx: %w", err)
+	}
+	return true, nil
+}
+
 func pgMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS jobs (
