@@ -31,9 +31,34 @@ func StartReaper(ctx context.Context, s store.JobStore, logger *slog.Logger, m *
 			logger.Info("reaper shutting down")
 			return
 		case <-ticker.C:
-			reap(ctx, s, logger, m)
-			s.UnblockReady(ctx)
+			runReaperTick(ctx, s, logger, m)
 		}
+	}
+}
+
+// runReaperTick executes one reaper cycle. If the store implements
+// ReaperLocker (e.g. PostgresStore with advisory locks), only the
+// lock holder runs the reap. Otherwise (MemoryStore, SQLiteStore),
+// the reap runs unconditionally.
+func runReaperTick(ctx context.Context, s store.JobStore, logger *slog.Logger, m *metrics.Metrics) {
+	doReap := func(ctx context.Context) {
+		reap(ctx, s, logger, m)
+		s.UnblockReady(ctx)
+	}
+
+	locker, ok := s.(store.ReaperLocker)
+	if !ok {
+		doReap(ctx)
+		return
+	}
+
+	acquired, err := locker.WithReaperLock(ctx, doReap)
+	if err != nil {
+		logger.Error("reaper lock error", "error", err)
+		return
+	}
+	if !acquired {
+		logger.Debug("reaper tick skipped, another instance holds the lock")
 	}
 }
 

@@ -46,6 +46,19 @@ type Job struct {
 	DependsOn     []string   `json:"depends_on,omitempty"`
 }
 
+// ReaperLocker is an optional interface that storage backends can implement
+// to coordinate reaper execution across multiple scheduler instances.
+// When multiple schedulers share the same database, only one should run the
+// reaper at a time. The reaper checks for this interface via type assertion;
+// stores that don't implement it (MemoryStore, SQLiteStore) run the reaper
+// unconditionally, which is correct for single-process deployments.
+type ReaperLocker interface {
+	// WithReaperLock attempts to acquire an exclusive reaper lock and,
+	// if successful, executes fn while holding it. Returns true if the lock
+	// was acquired (and fn was called), false if another instance holds it.
+	WithReaperLock(ctx context.Context, fn func(ctx context.Context)) (acquired bool, err error)
+}
+
 // generateID returns a unique job ID using a UUID v4.
 func generateID() string {
 	return fmt.Sprintf("job-%s", uuid.New().String())
