@@ -645,3 +645,32 @@ func TestRequestID_UniquePerRequest(t *testing.T) {
 		t.Errorf("expected unique request IDs, got same: %s", id1)
 	}
 }
+
+// --- Health endpoint tests ---
+
+func TestHandleHealth_ReturnsInstanceInfo(t *testing.T) {
+	srv := newTestServer()
+
+	r := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp["instance_id"] != "test-inst" {
+		t.Errorf("expected instance_id 'test-inst', got %q", resp["instance_id"])
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("expected status 'ok', got %q", resp["status"])
+	}
+	if resp["uptime"] == "" {
+		t.Error("expected non-empty uptime")
+	}
+}
