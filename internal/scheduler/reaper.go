@@ -48,6 +48,9 @@ func runReaperTick(ctx context.Context, s store.JobStore, logger *slog.Logger, m
 
 	locker, ok := s.(store.ReaperLocker)
 	if !ok {
+		// No coordination needed (single-process mode)
+		// this instance is always the reaper leader.
+		m.ReaperLeader.Set(1)
 		doReap(ctx)
 		return
 	}
