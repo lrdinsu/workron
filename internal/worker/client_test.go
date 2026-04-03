@@ -17,7 +17,7 @@ import (
 func newTestScheduler(t *testing.T) (*SchedulerClient, *store.MemoryStore, func()) {
 	t.Helper()
 	s := store.NewMemoryStore()
-	srv := scheduler.NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry())
+	srv := scheduler.NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
 	ts := httptest.NewServer(srv)
 	client := NewSchedulerClient(ts.URL, slog.Default())
 	return client, s, ts.Close
