@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/google/uuid"
 	"github.com/lrdinsu/workron/internal/metrics"
 	"github.com/lrdinsu/workron/internal/scheduler"
 	"github.com/lrdinsu/workron/internal/store"
@@ -77,8 +78,13 @@ func main() {
 	m.Register(registry)
 	registry.MustRegister(metrics.NewJobGaugeCollector(s))
 
+	// Generate a unique instance ID for this scheduler process.
+	// Used by the health endpoint and logging to distinguish instances
+	// in multi-scheduler deployments.
+	instanceID := uuid.New().String()[:8]
+
 	// Initialize the server
-	srv := scheduler.NewServer(s, slog.Default(), m, registry)
+	srv := scheduler.NewServer(s, slog.Default(), m, registry, instanceID)
 
 	// Start the heartbeat reaper to detect dead workers
 	go scheduler.StartReaper(ctx, s, slog.Default(), m)

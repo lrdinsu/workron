@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/lrdinsu/workron/internal/metrics"
@@ -20,21 +21,27 @@ const loggerKey contextKey = "logger"
 
 // Server holds the HTTP mux and the job store
 type Server struct {
-	store    store.JobStore
-	mux      *http.ServeMux
-	logger   *slog.Logger
-	metrics  *metrics.Metrics
-	registry *prometheus.Registry
+	store      store.JobStore
+	mux        *http.ServeMux
+	logger     *slog.Logger
+	metrics    *metrics.Metrics
+	registry   *prometheus.Registry
+	instanceID string
+	startTime  time.Time
 }
 
-// NewServer creates a new Server and registers all routes
-func NewServer(s store.JobStore, logger *slog.Logger, m *metrics.Metrics, registry *prometheus.Registry) *Server {
+// NewServer creates a new Server and registers all routes.
+// instanceID uniquely identifies this scheduler instance,
+// useful when multiple schedulers share one database.
+func NewServer(s store.JobStore, logger *slog.Logger, m *metrics.Metrics, registry *prometheus.Registry, instanceID string) *Server {
 	srv := &Server{
-		store:    s,
-		mux:      http.NewServeMux(),
-		logger:   logger,
-		metrics:  m,
-		registry: registry,
+		store:      s,
+		mux:        http.NewServeMux(),
+		logger:     logger,
+		metrics:    m,
+		registry:   registry,
+		instanceID: instanceID,
+		startTime:  time.Now(),
 	}
 	srv.registerRoutes()
 	return srv
@@ -77,6 +84,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /jobs/{id}/done", s.handleJobDone)
 	s.mux.HandleFunc("POST /jobs/{id}/fail", s.handleJobFail)
 	s.mux.HandleFunc("POST /jobs/{id}/heartbeat", s.handleHeartbeat)
+	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.Handle("GET /metrics", promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
 }
 
@@ -245,6 +253,17 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	s.store.UpdateHeartbeat(ctx, id)
 	w.WriteHeader(http.StatusOK)
+}
+
+// handleHealth handles GET /health
+// Returns the scheduler instance ID, uptime, and status. Useful for load-balancer
+// health checks and debugging multi-scheduler deployments.
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	s.writeJSON(w, http.StatusOK, map[string]string{
+		"instance_id": s.instanceID,
+		"uptime":      time.Since(s.startTime).Round(time.Second).String(),
+		"status":      "ok",
+	})
 }
 
 // writeJSON encodes v as JSON and writes it to w
