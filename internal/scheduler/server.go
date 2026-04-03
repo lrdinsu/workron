@@ -32,7 +32,7 @@ type Server struct {
 
 // NewServer creates a new Server and registers all routes.
 // instanceID uniquely identifies this scheduler instance,
-// userful when multiple schedulers share one database.
+// useful when multiple schedulers share one database.
 func NewServer(s store.JobStore, logger *slog.Logger, m *metrics.Metrics, registry *prometheus.Registry, instanceID string) *Server {
 	srv := &Server{
 		store:      s,
@@ -256,9 +256,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHealth handles GET /health
-// Returns the scheduler instance ID, uptime, and status. Useful for load
-// balancer health checks and debugging multi-scheduler deployments.
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+// Returns the scheduler instance ID, uptime, and status. Useful for load-balancer
+// health checks and debugging multi-scheduler deployments.
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]string{
 		"instance_id": s.instanceID,
 		"uptime":      time.Since(s.startTime).Round(time.Second).String(),
