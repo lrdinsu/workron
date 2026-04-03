@@ -36,10 +36,9 @@ func StartReaper(ctx context.Context, s store.JobStore, logger *slog.Logger, m *
 	}
 }
 
-// runReaperTick executes one reaper cycle. If the store implements
-// ReaperLocker (e.g. PostgresStore with advisory locks), only the
-// lock holder runs the reap. Otherwise (MemoryStore, SQLiteStore),
-// the reap runs unconditionally.
+// runReaperTick executes one reaper cycle. If the store implements ReaperLocker
+// (e.g. PostgresStore with advisory locks), only the lock holder runs the reap.
+// Otherwise (MemoryStore, SQLiteStore), the reap runs unconditionally.
 func runReaperTick(ctx context.Context, s store.JobStore, logger *slog.Logger, m *metrics.Metrics) {
 	doReap := func(ctx context.Context) {
 		reap(ctx, s, logger, m)
@@ -48,6 +47,9 @@ func runReaperTick(ctx context.Context, s store.JobStore, logger *slog.Logger, m
 
 	locker, ok := s.(store.ReaperLocker)
 	if !ok {
+		// No coordination needed (single-process mode)
+		// this instance is always the reaper leader.
+		m.ReaperLeader.Set(1)
 		doReap(ctx)
 		return
 	}
@@ -57,7 +59,10 @@ func runReaperTick(ctx context.Context, s store.JobStore, logger *slog.Logger, m
 		logger.Error("reaper lock error", "error", err)
 		return
 	}
-	if !acquired {
+	if acquired {
+		m.ReaperLeader.Set(1)
+	} else {
+		m.ReaperLeader.Set(0)
 		logger.Debug("reaper tick skipped, another instance holds the lock")
 	}
 }

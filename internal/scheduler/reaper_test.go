@@ -138,3 +138,73 @@ func TestReap_RequeuesJobWithNilHeartbeatAndStaleStart(t *testing.T) {
 		t.Errorf("expected status pending, got %s", job.Status)
 	}
 }
+
+// --- ReaperLocker tests ---
+
+// lockerStore embeds MemoryStore and implements ReaperLocker for testing.
+type lockerStore struct {
+	*store.MemoryStore
+	acquires bool // controls whether WithReaperLock grants the lock
+	called   bool // set to true if fn was called
+}
+
+func (l *lockerStore) WithReaperLock(_ context.Context, fn func(ctx context.Context)) (bool, error) {
+	if !l.acquires {
+		return false, nil
+	}
+	l.called = true
+	fn(context.Background())
+	return true, nil
+}
+
+func TestRunReaperTick_WithLock_RunsReap(t *testing.T) {
+	ctx := context.Background()
+	s := &lockerStore{MemoryStore: store.NewMemoryStore(), acquires: true}
+	id := s.AddJob(ctx, "echo hello", nil)
+	s.ClaimJob(ctx)
+	s.SetLastHeartbeat(id, time.Now().Add(-60*time.Second))
+
+	runReaperTick(ctx, s, slog.Default(), metrics.NewMetrics())
+
+	if !s.called {
+		t.Error("expected WithReaperLock to call fn, but it was not called")
+	}
+	job, _ := s.GetJob(ctx, id)
+	if job.Status != store.StatusPending {
+		t.Errorf("expected status pending after reap, got %s", job.Status)
+	}
+}
+
+func TestRunReaperTick_WithoutLock_SkipsReap(t *testing.T) {
+	ctx := context.Background()
+	s := &lockerStore{MemoryStore: store.NewMemoryStore(), acquires: false}
+	id := s.AddJob(ctx, "echo hello", nil)
+	s.ClaimJob(ctx)
+	s.SetLastHeartbeat(id, time.Now().Add(-60*time.Second))
+
+	runReaperTick(ctx, s, slog.Default(), metrics.NewMetrics())
+
+	if s.called {
+		t.Error("expected fn NOT to be called when lock is not acquired")
+	}
+	job, _ := s.GetJob(ctx, id)
+	if job.Status != store.StatusRunning {
+		t.Errorf("expected status running (reap skipped), got %s", job.Status)
+	}
+}
+
+func TestRunReaperTick_NoLocker_RunsUnconditionally(t *testing.T) {
+	// MemoryStore does not implement ReaperLocker, so reap runs directly.
+	ctx := context.Background()
+	s := store.NewMemoryStore()
+	id := s.AddJob(ctx, "echo hello", nil)
+	s.ClaimJob(ctx)
+	s.SetLastHeartbeat(id, time.Now().Add(-60*time.Second))
+
+	runReaperTick(ctx, s, slog.Default(), metrics.NewMetrics())
+
+	job, _ := s.GetJob(ctx, id)
+	if job.Status != store.StatusPending {
+		t.Errorf("expected status pending, got %s", job.Status)
+	}
+}

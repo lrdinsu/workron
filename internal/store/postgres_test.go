@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newTestPostgresStore(t *testing.T) JobStore {
@@ -227,4 +228,61 @@ func TestPostgres_PersistenceAcrossReconnect(t *testing.T) {
 
 	// Clean up.
 	_, _ = s2.pool.Exec(ctx, "DELETE FROM jobs")
+}
+
+// TestPostgres_WithReaperLock_ConcurrentInstances verifies that only
+// one of two concurrent callers acquires the advisory lock.
+func TestPostgres_WithReaperLock_ConcurrentInstances(t *testing.T) {
+	url := os.Getenv("WORKRON_PG_URL")
+	if url == "" {
+		t.Skip("WORKRON_PG_URL not set, skipping PostgreSQL tests")
+	}
+	ctx := context.Background()
+
+	// Two separate stores simulate two scheduler instances.
+	s1, err := NewPostgresStore(ctx, url, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s1.Close()
+
+	s2, err := NewPostgresStore(ctx, url, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+
+	// Both attempt to acquire the lock concurrently.
+	// One holds the lock for 200ms so both attempts overlap.
+	var wg sync.WaitGroup
+	results := make(chan bool, 2)
+
+	for _, s := range []*PostgresStore{s1, s2} {
+		wg.Add(1)
+		go func(store *PostgresStore) {
+			defer wg.Done()
+			acquired, err := store.WithReaperLock(ctx, func(_ context.Context) {
+				time.Sleep(200 * time.Millisecond) // hold the lock briefly
+			})
+			if err != nil {
+				t.Errorf("WithReaperLock error: %v", err)
+				return
+			}
+			results <- acquired
+		}(s)
+	}
+
+	wg.Wait()
+	close(results)
+
+	acquiredCount := 0
+	for acquired := range results {
+		if acquired {
+			acquiredCount++
+		}
+	}
+
+	if acquiredCount != 1 {
+		t.Errorf("expected exactly 1 lock acquisition, got %d", acquiredCount)
+	}
 }

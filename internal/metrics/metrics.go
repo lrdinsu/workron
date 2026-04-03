@@ -15,6 +15,9 @@ type Metrics struct {
 	// Histograms: track distributions of durations.
 	JobExecDuration prometheus.Histogram // seconds between claim and done
 	JobQueueWait    prometheus.Histogram // seconds between submit and claim
+
+	// Gauges: track current state.
+	ReaperLeader prometheus.Gauge // 1 if this instance holds the reaper advisory lock, 0 otherwise
 }
 
 // NewMetrics creates all metric objects but does not register them.
@@ -56,6 +59,11 @@ func NewMetrics() *Metrics {
 			Help:    "Time a job spent waiting in the queue before being claimed.",
 			Buckets: []float64{0.1, 0.5, 1, 5, 10, 30, 60, 120, 300},
 		}),
+
+		ReaperLeader: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "workron_reaper_leader",
+			Help: "Whether this scheduler instance currently holds the reaper advisory lock (1 = leader, 0 = follower).",
+		}),
 	}
 }
 
@@ -70,5 +78,6 @@ func (m *Metrics) Register(reg prometheus.Registerer) {
 		m.JobsReaped,
 		m.JobExecDuration,
 		m.JobQueueWait,
+		m.ReaperLeader,
 	)
 }
