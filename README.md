@@ -36,13 +36,19 @@ If you are curious about the design decisions and trade-offs behind this project
 - Structured JSON logging with `log/slog`: typed key-value fields, log levels, logger injection with `With` for component identity
 - Prometheus metrics: counters for job lifecycle events, histograms for execution duration and queue wait, gauges for current queue state via custom collector
 - Request ID tracing: UUID per HTTP request, `X-Request-ID` response header, request-scoped logger via context
+- Multi-scheduler coordination: multiple scheduler instances can share one PostgreSQL database safely. Job claiming uses `FOR UPDATE SKIP LOCKED`, reaper uses a transaction-scoped advisory lock (`pg_try_advisory_xact_lock`) so only one instance runs heartbeat timeout detection at a time. If the leader crashes, the lock auto-releases and another instance picks up.
+- Health endpoint: `GET /health` returns instance ID, uptime, and status for load balancer checks and debugging multi-scheduler deployments
 
-**Planned**
-- [ ] Multi-scheduler coordination (advisory locks for reaper)
+**Planned — ML Infrastructure**
+- [ ] Job resource requirements (GPU, VRAM, CPU, memory) and job output tracking
+- [ ] Worker registration with resource capacity reporting
+- [ ] Resource-aware scheduling with bin-packing placement
+- [ ] ML pipeline demo (DAG with mixed CPU/GPU steps and artifact references)
+
+**Planned — Execution Semantics**
 - [ ] Job cancellation (with cascading cancel for DAGs)
 - [ ] Configurable retry backoff and per-job timeouts
 - [ ] Backpressure and concurrency control
-- [ ] Worker routing (queue topics and capability tags)
 
 ---
 
@@ -89,7 +95,7 @@ Everything runs in a single process. Workers access the job store directly throu
 
 ### Distributed Mode
 
-The scheduler and workers run as separate binaries. Workers poll the scheduler over HTTP to claim jobs, send heartbeats, and report results. Workers can run on different machines.
+The scheduler and workers run as separate binaries. Workers poll the scheduler over HTTP to claim jobs, send heartbeats, and report results. Workers can run on different machines. Multiple scheduler instances can share one PostgreSQL database for high availability.
 
 ```
 ┌─────────────────────┐         ┌──────────────────────┐
@@ -295,13 +301,30 @@ curl -X POST http://localhost:8080/jobs/{id}/heartbeat
 
 Workers call this automatically every 5 seconds while processing a job. Returns `200` on success, `404` if job not found, `409` if job is not running.
 
+### Health check
+
+```bash
+curl http://localhost:8080/health
+```
+
+Response (`200 OK`):
+```json
+{
+  "instance_id": "a1b2c3d4",
+  "uptime": "2h15m30s",
+  "status": "ok"
+}
+```
+
+Each scheduler instance generates a unique short ID at startup. Useful for load balancer health checks and identifying which instance you're talking to in multi-scheduler deployments.
+
 ### Prometheus metrics
 
 ```bash
 curl http://localhost:8080/metrics
 ```
 
-Returns Prometheus-compatible metrics including `workron_jobs_submitted_total`, `workron_jobs_completed_total`, `workron_job_execution_duration_seconds`, `workron_jobs_pending`, and more.
+Returns Prometheus-compatible metrics including `workron_jobs_submitted_total`, `workron_jobs_completed_total`, `workron_job_execution_duration_seconds`, `workron_jobs_pending`, `workron_reaper_leader`, and more.
 
 ---
 
@@ -340,7 +363,7 @@ Workron provides three layers of observability:
 
 **Structured logging** (`log/slog`): all log output is JSON with typed fields (`job_id`, `worker_id`, `request_id`, `attempt`, `error`). Log levels distinguish normal events (Info), unusual events like reaper actions (Warn), and failures (Error). Each component receives its logger via dependency injection. Workers use `logger.With("worker_id", id)` so every log line automatically identifies the worker.
 
-**Prometheus metrics** (`GET /metrics`): counters track job lifecycle events (`workron_jobs_submitted_total`, `workron_jobs_claimed_total`, `workron_jobs_completed_total`, `workron_jobs_failed_total`, `workron_jobs_retried_total`, `workron_jobs_reaped_total`). Histograms track execution duration and queue wait time. Gauges report current queue state (`workron_jobs_pending`, `workron_jobs_running`, `workron_jobs_blocked`) via a custom `prometheus.Collector` that queries the store on each scrape.
+**Prometheus metrics** (`GET /metrics`): counters track job lifecycle events (`workron_jobs_submitted_total`, `workron_jobs_claimed_total`, `workron_jobs_completed_total`, `workron_jobs_failed_total`, `workron_jobs_retried_total`, `workron_jobs_reaped_total`). Histograms track execution duration and queue wait time. Gauges report current queue state (`workron_jobs_pending`, `workron_jobs_running`, `workron_jobs_blocked`) via a custom `prometheus.Collector` that queries the store on each scrape.  The `workron_reaper_leader` gauge indicates whether this instance is the active reaper leader (1) or a follower (0), useful for monitoring multi-scheduler deployments.
 
 **Request ID tracing**: every HTTP request receives a UUID, set as the `X-Request-ID` response header and included in all log lines for that request. A request-scoped child logger is created in `ServeHTTP` and propagated to handlers via context, so `request_id` appears automatically without manual threading.
 
@@ -354,7 +377,7 @@ Workron supports three storage backends, selectable at startup via `--db-driver`
 
 **SQLite store** (`--db-driver=sqlite --db-url=workron.db`): jobs persist to a single file on disk. The scheduler can crash and restart without losing any job state. Uses WAL mode for write performance and a single-connection pool to avoid SQLite's write lock contention. Uses `modernc.org/sqlite` (pure Go, no CGo).
 
-**PostgreSQL store** (`--db-driver=postgres --db-url=postgres://...`): jobs persist to PostgreSQL with a configurable connection pool (default 10 connections). Uses `FOR UPDATE SKIP LOCKED` for atomic job claiming, allowing multiple connections (or future multiple scheduler instances) to claim different jobs concurrently without blocking each other. Dependencies stored as JSONB, queried with `jsonb_array_elements_text()`. Uses `pgx/v5` for native PostgreSQL support.
+**PostgreSQL store** (`--db-driver=postgres --db-url=postgres://...`): jobs persist to PostgreSQL with a configurable connection pool (default 10 connections). Uses `FOR UPDATE SKIP LOCKED` for atomic job claiming, allowing multiple scheduler instances to claim different jobs concurrently without blocking each other. The reaper uses `pg_try_advisory_xact_lock` so only one instance runs heartbeat timeout detection at a time. Dependencies stored as JSONB, queried with `jsonb_array_elements_text()`. Uses `pgx/v5` for native PostgreSQL support.
 
 All three backends implement the same `JobStore` interface. The server, workers, and reaper are unaware of which store they're using.
 
