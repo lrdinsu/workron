@@ -11,14 +11,14 @@ import (
 
 // JobStore defines the behavior any storage backend must have
 type JobStore interface {
-	AddJob(ctx context.Context, command string, dependsOn []string) string
+	AddJob(ctx context.Context, params AddJobParams) string
 	ClaimJob(ctx context.Context) (*Job, bool)
 	GetJob(ctx context.Context, id string) (*Job, bool)
 	ListJobs(ctx context.Context) []*Job
 	ListRunningJobs(ctx context.Context) []*Job
 	UpdateJobStatus(ctx context.Context, id string, status JobStatus)
 	UpdateHeartbeat(ctx context.Context, id string)
-	SendHeartbeat(ctx context.Context, id string) error
+	SendHeartbeat(ctx context.Context, id string) (string, error)
 	UnblockReady(ctx context.Context)
 }
 

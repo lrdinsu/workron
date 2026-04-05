@@ -41,9 +41,9 @@ func TestValidateDeps_LinearChain(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()
 	// A <- B <- C <- new
-	idA := s.AddJob(ctx, "echo a", nil)
-	idB := s.AddJob(ctx, "echo b", []string{idA})
-	idC := s.AddJob(ctx, "echo c", []string{idB})
+	idA := s.AddJob(ctx, AddJobParams{Command: "echo a"})
+	idB := s.AddJob(ctx, AddJobParams{Command: "echo b", DependsOn: []string{idA}})
+	idC := s.AddJob(ctx, AddJobParams{Command: "echo c", DependsOn: []string{idB}})
 
 	err := ValidateDependencies(ctx, s, []string{idC})
 
@@ -60,10 +60,10 @@ func TestValidateDeps_Diamond(t *testing.T) {
 	//   B   C
 	//    \ /
 	//     D ← new
-	idA := s.AddJob(ctx, "echo a", nil)
-	idB := s.AddJob(ctx, "echo b", []string{idA})
-	idC := s.AddJob(ctx, "echo c", []string{idA})
-	idD := s.AddJob(ctx, "echo d", []string{idB, idC})
+	idA := s.AddJob(ctx, AddJobParams{Command: "echo a"})
+	idB := s.AddJob(ctx, AddJobParams{Command: "echo b", DependsOn: []string{idA}})
+	idC := s.AddJob(ctx, AddJobParams{Command: "echo c", DependsOn: []string{idA}})
+	idD := s.AddJob(ctx, AddJobParams{Command: "echo d", DependsOn: []string{idB, idC}})
 
 	err := ValidateDependencies(ctx, s, []string{idD})
 
@@ -75,9 +75,9 @@ func TestValidateDeps_Diamond(t *testing.T) {
 func TestValidateDeps_MultipleDependencies(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()
-	idA := s.AddJob(ctx, "echo a", nil)
-	idB := s.AddJob(ctx, "echo b", nil)
-	idC := s.AddJob(ctx, "echo c", nil)
+	idA := s.AddJob(ctx, AddJobParams{Command: "echo a"})
+	idB := s.AddJob(ctx, AddJobParams{Command: "echo b"})
+	idC := s.AddJob(ctx, AddJobParams{Command: "echo c"})
 
 	// New job depends on all three independent jobs.
 	err := ValidateDependencies(ctx, s, []string{idA, idB, idC})
@@ -92,7 +92,7 @@ func TestValidateDeps_MultipleDependencies(t *testing.T) {
 func TestValidateDeps_NonexistentDependency(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()
-	s.AddJob(ctx, "echo a", nil)
+	s.AddJob(ctx, AddJobParams{Command: "echo a"})
 
 	err := ValidateDependencies(ctx, s, []string{"nonexistent"})
 
@@ -104,7 +104,7 @@ func TestValidateDeps_NonexistentDependency(t *testing.T) {
 func TestValidateDeps_OneValidOneMissing(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()
-	idA := s.AddJob(ctx, "echo a", nil)
+	idA := s.AddJob(ctx, AddJobParams{Command: "echo a"})
 
 	err := ValidateDependencies(ctx, s, []string{idA, "nonexistent"})
 
@@ -118,8 +118,8 @@ func TestValidateDeps_OneValidOneMissing(t *testing.T) {
 func TestValidateDeps_SimpleCycle(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()
-	idA := s.AddJob(ctx, "echo a", nil)
-	idB := s.AddJob(ctx, "echo b", nil)
+	idA := s.AddJob(ctx, AddJobParams{Command: "echo a"})
+	idB := s.AddJob(ctx, AddJobParams{Command: "echo b"})
 
 	// Manually create A -> B -> A cycle in the store.
 	s.mu.Lock()
@@ -138,9 +138,9 @@ func TestValidateDeps_SimpleCycle(t *testing.T) {
 func TestValidateDeps_TransitiveCycle(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()
-	idA := s.AddJob(ctx, "echo a", nil)
-	idB := s.AddJob(ctx, "echo b", nil)
-	idC := s.AddJob(ctx, "echo c", nil)
+	idA := s.AddJob(ctx, AddJobParams{Command: "echo a"})
+	idB := s.AddJob(ctx, AddJobParams{Command: "echo b"})
+	idC := s.AddJob(ctx, AddJobParams{Command: "echo c"})
 
 	// Manually create A -> B -> C -> A cycle.
 	s.mu.Lock()
@@ -159,7 +159,7 @@ func TestValidateDeps_TransitiveCycle(t *testing.T) {
 func TestValidateDeps_SelfDependency(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()
-	idA := s.AddJob(ctx, "echo a", nil)
+	idA := s.AddJob(ctx, AddJobParams{Command: "echo a"})
 
 	// Manually make A depend on itself.
 	s.mu.Lock()
@@ -176,8 +176,8 @@ func TestValidateDeps_SelfDependency(t *testing.T) {
 func TestValidateDeps_CycleErrorMessage(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()
-	idA := s.AddJob(ctx, "echo a", nil)
-	idB := s.AddJob(ctx, "echo b", nil)
+	idA := s.AddJob(ctx, AddJobParams{Command: "echo a"})
+	idB := s.AddJob(ctx, AddJobParams{Command: "echo b"})
 
 	s.mu.Lock()
 	s.jobs[idA].DependsOn = []string{idB}

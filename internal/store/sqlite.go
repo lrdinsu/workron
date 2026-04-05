@@ -80,16 +80,16 @@ func migrate(db *sql.DB) error {
 
 // JobStore implementation
 
-func (s *SQLiteStore) AddJob(ctx context.Context, command string, dependsOn []string) string {
+func (s *SQLiteStore) AddJob(ctx context.Context, params AddJobParams) string {
 	id := generateID()
 	now := time.Now()
 
 	status := StatusPending
-	if len(dependsOn) > 0 {
+	if len(params.DependsOn) > 0 {
 		status = StatusBlocked
 	}
 
-	depsJSON, err := json.Marshal(dependsOn)
+	depsJSON, err := json.Marshal(params.DependsOn)
 	if err != nil {
 		panic(fmt.Sprintf("sqlite: marshal depends_on: %v", err))
 	}
@@ -97,7 +97,7 @@ func (s *SQLiteStore) AddJob(ctx context.Context, command string, dependsOn []st
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO jobs (id, command, status, created_at, max_retries, attempts, depends_on)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, command, string(status), now, 3, 0, string(depsJSON),
+		id, params.Command, string(status), now, 3, 0, string(depsJSON),
 	)
 
 	if err != nil {
@@ -167,9 +167,9 @@ func (s *SQLiteStore) UpdateHeartbeat(ctx context.Context, id string) {
 }
 
 // SendHeartbeat wraps UpdateHeartbeat to satisfy the worker.JobSource interface.
-func (s *SQLiteStore) SendHeartbeat(ctx context.Context, id string) error {
+func (s *SQLiteStore) SendHeartbeat(ctx context.Context, id string) (string, error) {
 	s.UpdateHeartbeat(ctx, id)
-	return nil
+	return "", nil
 }
 
 // UnblockReady transitions blocked jobs to pending when all their

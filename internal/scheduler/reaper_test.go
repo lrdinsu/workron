@@ -13,7 +13,7 @@ import (
 func TestReap_RequeuesStaleJob(t *testing.T) {
 	ctx := context.Background()
 	s := store.NewMemoryStore()
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, store.AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx) // attempt 1 of 3, status = running
 
 	s.SetLastHeartbeat(id, time.Now().Add(-60*time.Second))
@@ -29,7 +29,7 @@ func TestReap_RequeuesStaleJob(t *testing.T) {
 func TestReap_FailsJobWithExhaustedRetries(t *testing.T) {
 	ctx := context.Background()
 	s := store.NewMemoryStore()
-	id := s.AddJob(ctx, "bad command", nil)
+	id := s.AddJob(ctx, store.AddJobParams{Command: "bad command"})
 
 	// Exhaust all 3 retries
 	for i := 0; i < 3; i++ {
@@ -52,7 +52,7 @@ func TestReap_FailsJobWithExhaustedRetries(t *testing.T) {
 func TestReap_IgnoresHealthyJob(t *testing.T) {
 	ctx := context.Background()
 	s := store.NewMemoryStore()
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, store.AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx)
 	s.UpdateHeartbeat(ctx, id) // fresh heartbeat
 
@@ -67,8 +67,8 @@ func TestReap_IgnoresHealthyJob(t *testing.T) {
 func TestReap_IgnoresPendingAndDoneJobs(t *testing.T) {
 	ctx := context.Background()
 	s := store.NewMemoryStore()
-	id1 := s.AddJob(ctx, "echo one", nil)
-	id2 := s.AddJob(ctx, "echo two", nil)
+	id1 := s.AddJob(ctx, store.AddJobParams{Command: "echo one"})
+	id2 := s.AddJob(ctx, store.AddJobParams{Command: "echo two"})
 
 	// Claim both, then mark both as done
 	s.ClaimJob(ctx)
@@ -90,7 +90,7 @@ func TestReap_IgnoresPendingAndDoneJobs(t *testing.T) {
 func TestReap_RequeuesJobWithNilHeartbeat(t *testing.T) {
 	ctx := context.Background()
 	s := store.NewMemoryStore()
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, store.AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx) // running, no heartbeat, but StartedAt is now
 
 	// With a fresh StartedAt, reaper should leave it alone
@@ -125,7 +125,7 @@ func TestStartReaper_StopsOnContextCancel(t *testing.T) {
 func TestReap_RequeuesJobWithNilHeartbeatAndStaleStart(t *testing.T) {
 	ctx := context.Background()
 	s := store.NewMemoryStore()
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, store.AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx)
 
 	// Simulate a job that was claimed 60 seconds ago but never sent a heartbeat
@@ -160,7 +160,7 @@ func (l *lockerStore) WithReaperLock(_ context.Context, fn func(ctx context.Cont
 func TestRunReaperTick_WithLock_RunsReap(t *testing.T) {
 	ctx := context.Background()
 	s := &lockerStore{MemoryStore: store.NewMemoryStore(), acquires: true}
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, store.AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx)
 	s.SetLastHeartbeat(id, time.Now().Add(-60*time.Second))
 
@@ -178,7 +178,7 @@ func TestRunReaperTick_WithLock_RunsReap(t *testing.T) {
 func TestRunReaperTick_WithoutLock_SkipsReap(t *testing.T) {
 	ctx := context.Background()
 	s := &lockerStore{MemoryStore: store.NewMemoryStore(), acquires: false}
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, store.AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx)
 	s.SetLastHeartbeat(id, time.Now().Add(-60*time.Second))
 
@@ -197,7 +197,7 @@ func TestRunReaperTick_NoLocker_RunsUnconditionally(t *testing.T) {
 	// MemoryStore does not implement ReaperLocker, so reap runs directly.
 	ctx := context.Background()
 	s := store.NewMemoryStore()
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, store.AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx)
 	s.SetLastHeartbeat(id, time.Now().Add(-60*time.Second))
 

@@ -156,7 +156,7 @@ func TestMemoryStore_AddAndClaimJob(t *testing.T) {
 	ctx := context.Background()
 
 	// Test adding a Job
-	id := store.AddJob(ctx, "echo test", nil)
+	id := store.AddJob(ctx, AddJobParams{Command: "echo test"})
 	if id == "" {
 		t.Fatalf("Expected a valid ID, got an empty string")
 	}
@@ -188,9 +188,9 @@ func TestMemoryStore_ListRunningJobs(t *testing.T) {
 	ctx := context.Background()
 
 	// All pending
-	s.AddJob(ctx, "echo one", nil)
-	s.AddJob(ctx, "echo two", nil)
-	s.AddJob(ctx, "echo three", nil)
+	s.AddJob(ctx, AddJobParams{Command: "echo one"})
+	s.AddJob(ctx, AddJobParams{Command: "echo two"})
+	s.AddJob(ctx, AddJobParams{Command: "echo three"})
 
 	// One and two become running
 	s.ClaimJob(ctx)

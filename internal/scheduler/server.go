@@ -121,7 +121,10 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id := s.store.AddJob(ctx, req.Command, req.DependsOn)
+	id := s.store.AddJob(ctx, store.AddJobParams{
+		Command:   req.Command,
+		DependsOn: req.DependsOn,
+	})
 	job, _ := s.store.GetJob(ctx, id)
 
 	s.metrics.JobsSubmitted.Inc()

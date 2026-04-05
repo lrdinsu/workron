@@ -134,15 +134,17 @@ func (c *SchedulerClient) UpdateJobStatus(ctx context.Context, id string, status
 }
 
 // SendHeartbeat tells the scheduler the worker is still alive and working on this job.
-func (c *SchedulerClient) SendHeartbeat(ctx context.Context, id string) error {
+// The returned string is a heartbeat action (empty for now, future will return "preempt"
+// via the HTTP response body when the scheduler wants the worker to stop).
+func (c *SchedulerClient) SendHeartbeat(ctx context.Context, id string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/jobs/"+id+"/heartbeat", nil)
 	if err != nil {
-		return fmt.Errorf("heartbeat for job %s: %w", id, err)
+		return "", fmt.Errorf("heartbeat for job %s: %w", id, err)
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("heartbeat for job %s: %w", id, err)
+		return "", fmt.Errorf("heartbeat for job %s: %w", id, err)
 	}
 
 	defer func() {
@@ -152,8 +154,8 @@ func (c *SchedulerClient) SendHeartbeat(ctx context.Context, id string) error {
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("heartbeat for job %s: unexpected status %d", id, resp.StatusCode)
+		return "", fmt.Errorf("heartbeat for job %s: unexpected status %d", id, resp.StatusCode)
 	}
 
-	return nil
+	return "", nil
 }

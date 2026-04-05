@@ -16,7 +16,7 @@ const heartbeatInterval = 5 * time.Second
 type JobSource interface {
 	ClaimJob(ctx context.Context) (*store.Job, bool)
 	UpdateJobStatus(ctx context.Context, id string, status store.JobStatus)
-	SendHeartbeat(ctx context.Context, id string) error
+	SendHeartbeat(ctx context.Context, id string) (string, error)
 }
 
 // Worker polls a JobSource and executes jobs
@@ -84,7 +84,7 @@ func (w *Worker) process(ctx context.Context, job *store.Job) {
 	defer hbCancel()
 	go w.sendHeartbeats(hbCtx, job.ID)
 
-	err := w.executor.Execute(job.Command)
+	err := w.executor.Execute(ctx, job.Command, nil)
 	if err != nil {
 		if job.Attempts < job.MaxRetries {
 			w.logger.Warn("job failed, retrying", "job_id", job.ID, "attempt", job.Attempts, "max_retries", job.MaxRetries, "error", err)
@@ -112,7 +112,9 @@ func (w *Worker) sendHeartbeats(ctx context.Context, jobID string) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := w.source.SendHeartbeat(ctx, jobID); err != nil {
+			action, err := w.source.SendHeartbeat(ctx, jobID)
+			_ = action // placeholder for preemption logic in the future
+			if err != nil {
 				w.logger.Warn("heartbeat failed", "job_id", jobID, "error", err)
 			}
 		}
