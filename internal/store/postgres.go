@@ -190,9 +190,9 @@ func (s *PostgresStore) UpdateHeartbeat(ctx context.Context, id string) {
 }
 
 // SendHeartbeat wraps UpdateHeartbeat to satisfy the worker.JobSource interface.
-func (s *PostgresStore) SendHeartbeat(ctx context.Context, id string) error {
+func (s *PostgresStore) SendHeartbeat(ctx context.Context, id string) (string, error) {
 	s.UpdateHeartbeat(ctx, id)
-	return nil
+	return "", nil
 }
 
 // UnblockReady transitions blocked jobs to pending when all their

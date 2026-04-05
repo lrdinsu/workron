@@ -18,7 +18,7 @@ type JobStore interface {
 	ListRunningJobs(ctx context.Context) []*Job
 	UpdateJobStatus(ctx context.Context, id string, status JobStatus)
 	UpdateHeartbeat(ctx context.Context, id string)
-	SendHeartbeat(ctx context.Context, id string) error
+	SendHeartbeat(ctx context.Context, id string) (string, error)
 	UnblockReady(ctx context.Context)
 }
 

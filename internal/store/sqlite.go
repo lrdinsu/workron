@@ -167,9 +167,9 @@ func (s *SQLiteStore) UpdateHeartbeat(ctx context.Context, id string) {
 }
 
 // SendHeartbeat wraps UpdateHeartbeat to satisfy the worker.JobSource interface.
-func (s *SQLiteStore) SendHeartbeat(ctx context.Context, id string) error {
+func (s *SQLiteStore) SendHeartbeat(ctx context.Context, id string) (string, error) {
 	s.UpdateHeartbeat(ctx, id)
-	return nil
+	return "", nil
 }
 
 // UnblockReady transitions blocked jobs to pending when all their
