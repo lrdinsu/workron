@@ -61,22 +61,55 @@ func (s *SQLiteStore) Close() error {
 }
 
 func migrate(db *sql.DB) error {
-	schema := `
+	jobsSchema := `
 	CREATE TABLE IF NOT EXISTS jobs (
-		id             TEXT PRIMARY KEY,
-		command        TEXT NOT NULL,
-		status         TEXT NOT NULL DEFAULT 'pending',
-		created_at     DATETIME NOT NULL,
-		started_at     DATETIME,
-		done_at        DATETIME,
-		last_heartbeat DATETIME,
-		max_retries    INTEGER DEFAULT 3,
-		attempts       INTEGER DEFAULT 0,
-		depends_on     TEXT    DEFAULT '[]'
+		id                TEXT PRIMARY KEY,
+		command           TEXT NOT NULL,
+		status            TEXT NOT NULL DEFAULT 'pending',
+		created_at        DATETIME NOT NULL,
+		started_at        DATETIME,
+		done_at           DATETIME,
+		last_heartbeat    DATETIME,
+		max_retries       INTEGER DEFAULT 3,
+		attempts          INTEGER DEFAULT 0,
+		depends_on        TEXT    DEFAULT '[]',
+		resources         TEXT,
+		worker_id         TEXT    DEFAULT '',
+		priority          INTEGER DEFAULT 0,
+		queue_name        TEXT    DEFAULT '',
+		gang_id           TEXT    DEFAULT '',
+		gang_size         INTEGER DEFAULT 0,
+		gang_index        INTEGER DEFAULT 0,
+		checkpoint        TEXT,
+		outputs           TEXT,
+		reservation_epoch INTEGER DEFAULT 0,
+		preemption_epoch  INTEGER DEFAULT 0
 	)`
-	_, err := db.Exec(schema)
+	if _, err := db.Exec(jobsSchema); err != nil {
+		return err
+	}
+
+	workersSchema := `
+	CREATE TABLE IF NOT EXISTS workers (
+		id             TEXT PRIMARY KEY,
+		exec_addr      TEXT    NOT NULL,
+		resources      TEXT    NOT NULL DEFAULT '{}',
+		tags           TEXT    NOT NULL DEFAULT '[]',
+		status         TEXT    NOT NULL DEFAULT 'active',
+		last_heartbeat DATETIME NOT NULL,
+		registered_at  DATETIME NOT NULL
+	)`
+	_, err := db.Exec(workersSchema)
 	return err
 }
+
+// jobColumns is the canonical column list for all job SELECT queries.
+// Every scanJob / queryJobs call must match this order exactly.
+const jobColumns = `id, command, status, created_at, started_at, done_at,
+	last_heartbeat, max_retries, attempts, depends_on,
+	resources, worker_id, priority, queue_name,
+	gang_id, gang_size, gang_index,
+	checkpoint, outputs, reservation_epoch, preemption_epoch`
 
 // JobStore implementation
 
@@ -94,14 +127,27 @@ func (s *SQLiteStore) AddJob(ctx context.Context, params AddJobParams) string {
 		panic(fmt.Sprintf("sqlite: marshal depends_on: %v", err))
 	}
 
+	var resourcesJSON *string
+	if params.Resources != nil {
+		b, err := json.Marshal(params.Resources)
+		if err != nil {
+			panic(fmt.Sprintf("sqlite: marshal resources: %v", err))
+		}
+		s := string(b)
+		resourcesJSON = &s
+	}
+
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO jobs (id, command, status, created_at, max_retries, attempts, depends_on)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO jobs (id, command, status, created_at, max_retries, attempts, depends_on,
+		                    resources, priority, queue_name, gang_id, gang_size, gang_index)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, params.Command, string(status), now, 3, 0, string(depsJSON),
+		resourcesJSON, params.Priority, params.QueueName,
+		params.GangID, params.GangSize, params.GangIndex,
 	)
 
 	if err != nil {
-		// Only fails on disk full or DB corruption, surface is loudly
+		// Only fails on disk full or DB corruption, surface it loudly
 		// rather than silently dropping a job.
 		panic(fmt.Sprintf("sqlite: add job: %v", err))
 	}
@@ -111,9 +157,7 @@ func (s *SQLiteStore) AddJob(ctx context.Context, params AddJobParams) string {
 
 func (s *SQLiteStore) GetJob(ctx context.Context, id string) (*Job, bool) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, command, status, created_at, started_at, done_at,
-		        last_heartbeat, max_retries, attempts, depends_on
-		 FROM jobs WHERE id = ?`, id,
+		`SELECT `+jobColumns+` FROM jobs WHERE id = ?`, id,
 	)
 	return scanJob(row)
 }
@@ -122,8 +166,7 @@ func (s *SQLiteStore) ClaimJob(ctx context.Context) (*Job, bool) {
 	row := s.db.QueryRowContext(ctx, `
 		UPDATE jobs SET status = 'running', started_at = ?, attempts = attempts + 1, last_heartbeat = NULL
 		WHERE id = (SELECT id FROM jobs WHERE status = 'pending' LIMIT 1)
-		RETURNING id, command, status, created_at, started_at, done_at,
-		          last_heartbeat, max_retries, attempts, depends_on`,
+		RETURNING `+jobColumns,
 		time.Now(),
 	)
 	return scanJob(row)
@@ -146,14 +189,11 @@ func (s *SQLiteStore) UpdateJobStatus(ctx context.Context, id string, status Job
 }
 
 func (s *SQLiteStore) ListJobs(ctx context.Context) []*Job {
-	return s.queryJobs(ctx, `SELECT id, command, status, created_at, started_at, done_at,
-	                            last_heartbeat, max_retries, attempts, depends_on FROM jobs`)
+	return s.queryJobs(ctx, `SELECT `+jobColumns+` FROM jobs`)
 }
 
 func (s *SQLiteStore) ListRunningJobs(ctx context.Context) []*Job {
-	return s.queryJobs(ctx, `SELECT id, command, status, created_at, started_at, done_at,
-	                            last_heartbeat, max_retries, attempts, depends_on
-	                     FROM jobs WHERE status = 'running'`)
+	return s.queryJobs(ctx, `SELECT `+jobColumns+` FROM jobs WHERE status = 'running'`)
 }
 
 func (s *SQLiteStore) UpdateHeartbeat(ctx context.Context, id string) {
@@ -190,27 +230,16 @@ func (s *SQLiteStore) UnblockReady(ctx context.Context) {
 
 // --- Scan helpers ---
 
-// scanJob scans a single database row into a Job.
-// Column order must match: id, command, status, created_at, started_at,
-// done_at, last_heartbeat, max_retries, attempts, depends_on.
-func scanJob(row *sql.Row) (*Job, bool) {
-	var j Job
-	var status string
-	var startedAt, doneAt, lastHeartbeat sql.NullTime
-	var depsJSON string
-
-	err := row.Scan(
-		&j.ID, &j.Command, &status, &j.CreatedAt,
-		&startedAt, &doneAt, &lastHeartbeat,
-		&j.MaxRetries, &j.Attempts, &depsJSON,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, false
-	}
-	if err != nil {
-		panic(fmt.Sprintf("sqlite: scan job: %v", err))
-	}
-
+// populateJobFromNullables fills a Job's nullable and JSON fields after scanning.
+func populateJobFromNullables(j *Job, status string,
+	startedAt, doneAt, lastHeartbeat sql.NullTime,
+	depsJSON string, resourcesJSON sql.NullString,
+	workerID sql.NullString, priority sql.NullInt64,
+	queueName, gangID sql.NullString,
+	gangSize, gangIndex sql.NullInt64,
+	checkpoint, outputs sql.NullString,
+	reservationEpoch, preemptionEpoch sql.NullInt64,
+) {
 	j.Status = JobStatus(status)
 	if startedAt.Valid {
 		j.StartedAt = &startedAt.Time
@@ -224,6 +253,76 @@ func scanJob(row *sql.Row) (*Job, bool) {
 	if err := json.Unmarshal([]byte(depsJSON), &j.DependsOn); err != nil {
 		panic(fmt.Sprintf("sqlite: unmarshal depends_on: %v", err))
 	}
+	if resourcesJSON.Valid && resourcesJSON.String != "" {
+		var r ResourceSpec
+		if err := json.Unmarshal([]byte(resourcesJSON.String), &r); err != nil {
+			panic(fmt.Sprintf("sqlite: unmarshal resources: %v", err))
+		}
+		j.Resources = &r
+	}
+	if workerID.Valid {
+		j.WorkerID = workerID.String
+	}
+	if priority.Valid {
+		j.Priority = int(priority.Int64)
+	}
+	if queueName.Valid {
+		j.QueueName = queueName.String
+	}
+	if gangID.Valid {
+		j.GangID = gangID.String
+	}
+	if gangSize.Valid {
+		j.GangSize = int(gangSize.Int64)
+	}
+	if gangIndex.Valid {
+		j.GangIndex = int(gangIndex.Int64)
+	}
+	if checkpoint.Valid {
+		j.Checkpoint = json.RawMessage(checkpoint.String)
+	}
+	if outputs.Valid {
+		j.Outputs = json.RawMessage(outputs.String)
+	}
+	if reservationEpoch.Valid {
+		j.ReservationEpoch = int(reservationEpoch.Int64)
+	}
+	if preemptionEpoch.Valid {
+		j.PreemptionEpoch = int(preemptionEpoch.Int64)
+	}
+}
+
+// scanJob scans a single database row into a Job.
+// Column order must match jobColumns.
+func scanJob(row *sql.Row) (*Job, bool) {
+	var j Job
+	var status string
+	var startedAt, doneAt, lastHeartbeat sql.NullTime
+	var depsJSON string
+	var resourcesJSON, workerID, queueName, gangID sql.NullString
+	var checkpoint, outputs sql.NullString
+	var priority, gangSize, gangIndex sql.NullInt64
+	var reservationEpoch, preemptionEpoch sql.NullInt64
+
+	err := row.Scan(
+		&j.ID, &j.Command, &status, &j.CreatedAt,
+		&startedAt, &doneAt, &lastHeartbeat,
+		&j.MaxRetries, &j.Attempts, &depsJSON,
+		&resourcesJSON, &workerID, &priority, &queueName,
+		&gangID, &gangSize, &gangIndex,
+		&checkpoint, &outputs, &reservationEpoch, &preemptionEpoch,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false
+	}
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: scan job: %v", err))
+	}
+
+	populateJobFromNullables(&j, status, startedAt, doneAt, lastHeartbeat,
+		depsJSON, resourcesJSON, workerID, priority, queueName,
+		gangID, gangSize, gangIndex, checkpoint, outputs,
+		reservationEpoch, preemptionEpoch)
 
 	return &j, true
 }
@@ -242,28 +341,27 @@ func (s *SQLiteStore) queryJobs(ctx context.Context, query string, args ...any) 
 		var status string
 		var startedAt, doneAt, lastHeartbeat sql.NullTime
 		var depsJSON string
+		var resourcesJSON, workerID, queueName, gangID sql.NullString
+		var checkpoint, outputs sql.NullString
+		var priority, gangSize, gangIndex sql.NullInt64
+		var reservationEpoch, preemptionEpoch sql.NullInt64
 
 		if err := rows.Scan(
 			&j.ID, &j.Command, &status, &j.CreatedAt,
 			&startedAt, &doneAt, &lastHeartbeat,
 			&j.MaxRetries, &j.Attempts, &depsJSON,
+			&resourcesJSON, &workerID, &priority, &queueName,
+			&gangID, &gangSize, &gangIndex,
+			&checkpoint, &outputs, &reservationEpoch, &preemptionEpoch,
 		); err != nil {
 			panic(fmt.Sprintf("sqlite: scan job row: %v", err))
 		}
 
-		j.Status = JobStatus(status)
-		if startedAt.Valid {
-			j.StartedAt = &startedAt.Time
-		}
-		if doneAt.Valid {
-			j.DoneAt = &doneAt.Time
-		}
-		if lastHeartbeat.Valid {
-			j.LastHeartbeat = &lastHeartbeat.Time
-		}
-		if err := json.Unmarshal([]byte(depsJSON), &j.DependsOn); err != nil {
-			panic(fmt.Sprintf("sqlite: unmarshal depends_on: %v", err))
-		}
+		populateJobFromNullables(&j, status, startedAt, doneAt, lastHeartbeat,
+			depsJSON, resourcesJSON, workerID, priority, queueName,
+			gangID, gangSize, gangIndex, checkpoint, outputs,
+			reservationEpoch, preemptionEpoch)
+
 		jobs = append(jobs, &j)
 	}
 
