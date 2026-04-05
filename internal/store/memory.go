@@ -2,20 +2,23 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
 
-// MemoryStore holds jobs in memory safely
+// MemoryStore holds jobs and workers in memory safely
 type MemoryStore struct {
-	mu   sync.RWMutex
-	jobs map[string]*Job
+	mu      sync.RWMutex
+	jobs    map[string]*Job
+	workers map[string]*Worker
 }
 
 // NewMemoryStore initializes the store
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		jobs: make(map[string]*Job),
+		jobs:    make(map[string]*Job),
+		workers: make(map[string]*Worker),
 	}
 }
 
@@ -187,5 +190,115 @@ func (s *MemoryStore) SetStartedAt(id string, t time.Time) {
 
 	if job, exists := s.jobs[id]; exists {
 		job.StartedAt = &t
+	}
+}
+
+// --- WorkerStore implementation ---
+
+// RegisterWorker upserts a worker into the store.
+// If the worker ID already exists, it updates the existing entry.
+func (s *MemoryStore) RegisterWorker(_ context.Context, w Worker) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	w.Status = WorkerActive
+	w.LastHeartbeat = now
+	w.RegisteredAt = now
+
+	// If worker already exists, preserve the original registration time.
+	if existing, ok := s.workers[w.ID]; ok {
+		w.RegisteredAt = existing.RegisteredAt
+	}
+
+	s.workers[w.ID] = &w
+	return nil
+}
+
+// WorkerHeartbeat updates the last heartbeat time for a worker.
+// Returns an error if the worker is not registered.
+func (s *MemoryStore) WorkerHeartbeat(_ context.Context, workerID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	w, exists := s.workers[workerID]
+	if !exists {
+		return fmt.Errorf("worker %q not found", workerID)
+	}
+
+	w.LastHeartbeat = time.Now()
+	w.Status = WorkerActive
+	return nil
+}
+
+// GetWorker retrieves a worker by ID. Returns a copy to prevent mutations.
+func (s *MemoryStore) GetWorker(_ context.Context, workerID string) (*Worker, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	w, exists := s.workers[workerID]
+	if !exists {
+		return nil, false
+	}
+
+	wCopy := *w
+	return &wCopy, true
+}
+
+// ListWorkers returns copies of all registered workers.
+func (s *MemoryStore) ListWorkers(_ context.Context) []*Worker {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	list := make([]*Worker, 0, len(s.workers))
+	for _, w := range s.workers {
+		wCopy := *w
+		list = append(list, &wCopy)
+	}
+	return list
+}
+
+// ListActiveWorkers returns copies of workers with status active.
+func (s *MemoryStore) ListActiveWorkers(_ context.Context) []*Worker {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var list []*Worker
+	for _, w := range s.workers {
+		if w.Status == WorkerActive {
+			wCopy := *w
+			list = append(list, &wCopy)
+		}
+	}
+	if list == nil {
+		return []*Worker{}
+	}
+	return list
+}
+
+// RemoveStaleWorkers marks workers whose last heartbeat is older than
+// timeout as offline. Returns the number of workers marked offline.
+func (s *MemoryStore) RemoveStaleWorkers(_ context.Context, timeout time.Duration) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	count := 0
+	for _, w := range s.workers {
+		if w.Status == WorkerActive && now.Sub(w.LastHeartbeat) > timeout {
+			w.Status = WorkerOffline
+			count++
+		}
+	}
+	return count
+}
+
+// SetWorkerHeartbeat sets a worker's heartbeat to a specific time. Used for testing.
+func (s *MemoryStore) SetWorkerHeartbeat(id string, t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if w, exists := s.workers[id]; exists {
+		w.LastHeartbeat = t
 	}
 }
