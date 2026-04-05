@@ -94,15 +94,16 @@ func pgMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 // --- JobStore implementation ---
 
-func (s *PostgresStore) AddJob(ctx context.Context, command string, dependsOn []string) string {
+func (s *PostgresStore) AddJob(ctx context.Context, params AddJobParams) string {
 	id := generateID()
 	now := time.Now()
 
 	status := StatusPending
-	if len(dependsOn) > 0 {
+	if len(params.DependsOn) > 0 {
 		status = StatusBlocked
 	}
 
+	dependsOn := params.DependsOn
 	if dependsOn == nil {
 		dependsOn = []string{}
 	}
@@ -114,7 +115,7 @@ func (s *PostgresStore) AddJob(ctx context.Context, command string, dependsOn []
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO jobs (id, command, status, created_at, max_retries, attempts, depends_on)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-		id, command, string(status), now, 3, 0, string(depsJSON),
+		id, params.Command, string(status), now, 3, 0, string(depsJSON),
 	)
 	if err != nil {
 		panic(fmt.Sprintf("postgres: add job: %v", err))

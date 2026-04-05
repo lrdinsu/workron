@@ -24,24 +24,30 @@ func NewMemoryStore() *MemoryStore {
 
 // AddJob safely creates a new job and adds it to the map.
 // Jobs with dependencies start as blocked; jobs without start as pending.
-func (s *MemoryStore) AddJob(_ context.Context, command string, dependsOn []string) string {
+func (s *MemoryStore) AddJob(_ context.Context, params AddJobParams) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	id := generateID()
 
 	status := StatusPending
-	if len(dependsOn) > 0 {
+	if len(params.DependsOn) > 0 {
 		status = StatusBlocked
 	}
 
 	s.jobs[id] = &Job{
 		ID:         id,
-		Command:    command,
+		Command:    params.Command,
 		Status:     status,
 		CreatedAt:  time.Now(),
 		MaxRetries: 3, // Defaulting to 3 max retries
-		DependsOn:  dependsOn,
+		DependsOn:  params.DependsOn,
+		Resources:  params.Resources,
+		Priority:   params.Priority,
+		QueueName:  params.QueueName,
+		GangID:     params.GangID,
+		GangSize:   params.GangSize,
+		GangIndex:  params.GangIndex,
 	}
 
 	return id

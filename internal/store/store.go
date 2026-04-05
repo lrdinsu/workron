@@ -11,7 +11,7 @@ import (
 
 // JobStore defines the behavior any storage backend must have
 type JobStore interface {
-	AddJob(ctx context.Context, command string, dependsOn []string) string
+	AddJob(ctx context.Context, params AddJobParams) string
 	ClaimJob(ctx context.Context) (*Job, bool)
 	GetJob(ctx context.Context, id string) (*Job, bool)
 	ListJobs(ctx context.Context) []*Job
