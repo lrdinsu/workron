@@ -75,20 +75,45 @@ func (s *PostgresStore) WithReaperLock(ctx context.Context, fn func(ctx context.
 }
 
 func pgMigrate(ctx context.Context, pool *pgxpool.Pool) error {
-	schema := `
+	jobsSchema := `
 	CREATE TABLE IF NOT EXISTS jobs (
-		id             TEXT PRIMARY KEY,
-		command        TEXT NOT NULL,
-		status         TEXT NOT NULL DEFAULT 'pending',
-		created_at     TIMESTAMPTZ NOT NULL,
-		started_at     TIMESTAMPTZ,
-		done_at        TIMESTAMPTZ,
-		last_heartbeat TIMESTAMPTZ,
-		max_retries    INTEGER DEFAULT 3,
-		attempts       INTEGER DEFAULT 0,
-		depends_on     JSONB DEFAULT '[]'::jsonb
+		id                TEXT PRIMARY KEY,
+		command           TEXT NOT NULL,
+		status            TEXT NOT NULL DEFAULT 'pending',
+		created_at        TIMESTAMPTZ NOT NULL,
+		started_at        TIMESTAMPTZ,
+		done_at           TIMESTAMPTZ,
+		last_heartbeat    TIMESTAMPTZ,
+		max_retries       INTEGER DEFAULT 3,
+		attempts          INTEGER DEFAULT 0,
+		depends_on        JSONB   DEFAULT '[]'::jsonb,
+		resources         JSONB,
+		worker_id         TEXT    DEFAULT '',
+		priority          INTEGER DEFAULT 0,
+		queue_name        TEXT    DEFAULT '',
+		gang_id           TEXT    DEFAULT '',
+		gang_size         INTEGER DEFAULT 0,
+		gang_index        INTEGER DEFAULT 0,
+		checkpoint        JSONB,
+		outputs           JSONB,
+		reservation_epoch INTEGER DEFAULT 0,
+		preemption_epoch  INTEGER DEFAULT 0
 	)`
-	_, err := pool.Exec(ctx, schema)
+	if _, err := pool.Exec(ctx, jobsSchema); err != nil {
+		return err
+	}
+
+	workersSchema := `
+	CREATE TABLE IF NOT EXISTS workers (
+		id             TEXT PRIMARY KEY,
+		exec_addr      TEXT        NOT NULL,
+		resources      JSONB       NOT NULL DEFAULT '{}'::jsonb,
+		tags           JSONB       NOT NULL DEFAULT '[]'::jsonb,
+		status         TEXT        NOT NULL DEFAULT 'active',
+		last_heartbeat TIMESTAMPTZ NOT NULL,
+		registered_at  TIMESTAMPTZ NOT NULL
+	)`
+	_, err := pool.Exec(ctx, workersSchema)
 	return err
 }
 

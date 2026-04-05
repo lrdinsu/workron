@@ -61,20 +61,45 @@ func (s *SQLiteStore) Close() error {
 }
 
 func migrate(db *sql.DB) error {
-	schema := `
+	jobsSchema := `
 	CREATE TABLE IF NOT EXISTS jobs (
-		id             TEXT PRIMARY KEY,
-		command        TEXT NOT NULL,
-		status         TEXT NOT NULL DEFAULT 'pending',
-		created_at     DATETIME NOT NULL,
-		started_at     DATETIME,
-		done_at        DATETIME,
-		last_heartbeat DATETIME,
-		max_retries    INTEGER DEFAULT 3,
-		attempts       INTEGER DEFAULT 0,
-		depends_on     TEXT    DEFAULT '[]'
+		id                TEXT PRIMARY KEY,
+		command           TEXT NOT NULL,
+		status            TEXT NOT NULL DEFAULT 'pending',
+		created_at        DATETIME NOT NULL,
+		started_at        DATETIME,
+		done_at           DATETIME,
+		last_heartbeat    DATETIME,
+		max_retries       INTEGER DEFAULT 3,
+		attempts          INTEGER DEFAULT 0,
+		depends_on        TEXT    DEFAULT '[]',
+		resources         TEXT,
+		worker_id         TEXT    DEFAULT '',
+		priority          INTEGER DEFAULT 0,
+		queue_name        TEXT    DEFAULT '',
+		gang_id           TEXT    DEFAULT '',
+		gang_size         INTEGER DEFAULT 0,
+		gang_index        INTEGER DEFAULT 0,
+		checkpoint        TEXT,
+		outputs           TEXT,
+		reservation_epoch INTEGER DEFAULT 0,
+		preemption_epoch  INTEGER DEFAULT 0
 	)`
-	_, err := db.Exec(schema)
+	if _, err := db.Exec(jobsSchema); err != nil {
+		return err
+	}
+
+	workersSchema := `
+	CREATE TABLE IF NOT EXISTS workers (
+		id             TEXT PRIMARY KEY,
+		exec_addr      TEXT    NOT NULL,
+		resources      TEXT    NOT NULL DEFAULT '{}',
+		tags           TEXT    NOT NULL DEFAULT '[]',
+		status         TEXT    NOT NULL DEFAULT 'active',
+		last_heartbeat DATETIME NOT NULL,
+		registered_at  DATETIME NOT NULL
+	)`
+	_, err := db.Exec(workersSchema)
 	return err
 }
 
