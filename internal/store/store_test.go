@@ -18,7 +18,7 @@ func testAddJobReturnsID(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, AddJobParams{Command: "echo hello"})
 
 	if id == "" {
 		t.Fatal("AddJob returned empty ID")
@@ -30,8 +30,8 @@ func testAddJobUniqueIDs(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	id1 := s.AddJob(ctx, "echo a", nil)
-	id2 := s.AddJob(ctx, "echo b", nil)
+	id1 := s.AddJob(ctx, AddJobParams{Command: "echo a"})
+	id2 := s.AddJob(ctx, AddJobParams{Command: "echo b"})
 
 	if id1 == id2 {
 		t.Errorf("AddJob returned duplicate IDs: %s", id1)
@@ -44,7 +44,7 @@ func testGetJobRoundTrip(t *testing.T, factory StoreFactory) {
 	ctx := context.Background()
 	before := time.Now()
 
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, AddJobParams{Command: "echo hello"})
 	job, found := s.GetJob(ctx, id)
 
 	if !found {
@@ -99,7 +99,7 @@ func testGetJobReturnsACopy(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, AddJobParams{Command: "echo hello"})
 
 	job1, _ := s.GetJob(ctx, id)
 	job2, _ := s.GetJob(ctx, id)
@@ -119,7 +119,7 @@ func testClaimJobReturnsJob(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, AddJobParams{Command: "echo hello"})
 	before := time.Now()
 
 	job, ok := s.ClaimJob(ctx)
@@ -165,7 +165,7 @@ func testClaimJobSkipsNonPending(t *testing.T, factory StoreFactory) {
 	ctx := context.Background()
 
 	// Add one job and claim it, now it's running.
-	s.AddJob(ctx, "echo hello", nil)
+	s.AddJob(ctx, AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx)
 
 	// Second claim should find nothing.
@@ -183,7 +183,7 @@ func testClaimJobNoDuplicates(t *testing.T, factory StoreFactory) {
 
 	// Add 5 jobs.
 	for i := 0; i < 5; i++ {
-		s.AddJob(ctx, "echo hello", nil)
+		s.AddJob(ctx, AddJobParams{Command: "echo hello"})
 	}
 
 	// Claim all 5 from concurrent goroutines.
@@ -221,7 +221,7 @@ func testUpdateJobStatusDone(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx)
 	before := time.Now()
 
@@ -241,7 +241,7 @@ func testUpdateJobStatusFailed(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx)
 	before := time.Now()
 
@@ -261,7 +261,7 @@ func testUpdateJobStatusRequeue(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx)
 
 	// Re-queue: set back to pending (retry scenario).
@@ -298,9 +298,9 @@ func testListJobsReturnsAll(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	s.AddJob(ctx, "echo a", nil)
-	s.AddJob(ctx, "echo b", nil)
-	s.AddJob(ctx, "echo c", nil)
+	s.AddJob(ctx, AddJobParams{Command: "echo a"})
+	s.AddJob(ctx, AddJobParams{Command: "echo b"})
+	s.AddJob(ctx, AddJobParams{Command: "echo c"})
 
 	jobs := s.ListJobs(ctx)
 
@@ -316,7 +316,7 @@ func testListRunningJobsEmpty(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	s.AddJob(ctx, "echo pending", nil)
+	s.AddJob(ctx, AddJobParams{Command: "echo pending"})
 
 	jobs := s.ListRunningJobs(ctx)
 
@@ -330,9 +330,9 @@ func testListRunningJobsFilters(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	s.AddJob(ctx, "echo a", nil)
-	s.AddJob(ctx, "echo b", nil)
-	s.AddJob(ctx, "echo c", nil)
+	s.AddJob(ctx, AddJobParams{Command: "echo a"})
+	s.AddJob(ctx, AddJobParams{Command: "echo b"})
+	s.AddJob(ctx, AddJobParams{Command: "echo c"})
 	// Claim 2, they become running.
 	s.ClaimJob(ctx)
 	s.ClaimJob(ctx)
@@ -356,7 +356,7 @@ func testUpdateHeartbeat(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx)
 	before := time.Now()
 
@@ -378,7 +378,7 @@ func testAddJobNoDependencies(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, AddJobParams{Command: "echo hello"})
 
 	job, _ := s.GetJob(ctx, id)
 	if job.Status != StatusPending {
@@ -391,8 +391,8 @@ func testAddJobWithDependenciesStartsBlocked(t *testing.T, factory StoreFactory)
 	s := factory(t)
 	ctx := context.Background()
 
-	depID := s.AddJob(ctx, "echo dep", nil)
-	id := s.AddJob(ctx, "echo child", []string{depID})
+	depID := s.AddJob(ctx, AddJobParams{Command: "echo dep"})
+	id := s.AddJob(ctx, AddJobParams{Command: "echo child", DependsOn: []string{depID}})
 
 	job, _ := s.GetJob(ctx, id)
 	if job.Status != StatusBlocked {
@@ -408,8 +408,8 @@ func testClaimJobSkipsBlocked(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	depID := s.AddJob(ctx, "echo dep", nil)
-	s.AddJob(ctx, "echo child", []string{depID})
+	depID := s.AddJob(ctx, AddJobParams{Command: "echo dep"})
+	s.AddJob(ctx, AddJobParams{Command: "echo child", DependsOn: []string{depID}})
 
 	// Claim should only return the dependency, not the blocked child.
 	job, ok := s.ClaimJob(ctx)
@@ -432,9 +432,9 @@ func testDependsOnRoundTrip(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	dep1 := s.AddJob(ctx, "echo a", nil)
-	dep2 := s.AddJob(ctx, "echo b", nil)
-	id := s.AddJob(ctx, "echo c", []string{dep1, dep2})
+	dep1 := s.AddJob(ctx, AddJobParams{Command: "echo a"})
+	dep2 := s.AddJob(ctx, AddJobParams{Command: "echo b"})
+	id := s.AddJob(ctx, AddJobParams{Command: "echo c", DependsOn: []string{dep1, dep2}})
 
 	job, _ := s.GetJob(ctx, id)
 	if len(job.DependsOn) != 2 {
@@ -457,8 +457,8 @@ func testUnblockReadyAfterAllDepsDone(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	depID := s.AddJob(ctx, "echo dep", nil)
-	childID := s.AddJob(ctx, "echo child", []string{depID})
+	depID := s.AddJob(ctx, AddJobParams{Command: "echo dep"})
+	childID := s.AddJob(ctx, AddJobParams{Command: "echo child", DependsOn: []string{depID}})
 
 	// Child should be blocked.
 	child, _ := s.GetJob(ctx, childID)
@@ -483,9 +483,9 @@ func testUnblockReadyPartialDeps(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	dep1 := s.AddJob(ctx, "echo a", nil)
-	dep2 := s.AddJob(ctx, "echo b", nil)
-	childID := s.AddJob(ctx, "echo child", []string{dep1, dep2})
+	dep1 := s.AddJob(ctx, AddJobParams{Command: "echo a"})
+	dep2 := s.AddJob(ctx, AddJobParams{Command: "echo b"})
+	childID := s.AddJob(ctx, AddJobParams{Command: "echo child", DependsOn: []string{dep1, dep2}})
 
 	// Complete only the first dependency.
 	s.ClaimJob(ctx)
@@ -516,9 +516,9 @@ func testUnblockReadyChain(t *testing.T, factory StoreFactory) {
 	ctx := context.Background()
 
 	// A <- B <- C (linear chain)
-	idA := s.AddJob(ctx, "echo a", nil)
-	idB := s.AddJob(ctx, "echo b", []string{idA})
-	idC := s.AddJob(ctx, "echo c", []string{idB})
+	idA := s.AddJob(ctx, AddJobParams{Command: "echo a"})
+	idB := s.AddJob(ctx, AddJobParams{Command: "echo b", DependsOn: []string{idA}})
+	idC := s.AddJob(ctx, AddJobParams{Command: "echo c", DependsOn: []string{idB}})
 
 	// Complete A -> B unblocks, C stays blocked.
 	s.ClaimJob(ctx)
@@ -550,7 +550,7 @@ func testUnblockReadyIgnoresNonBlocked(t *testing.T, factory StoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx)
 
 	// Job is running. UnblockReady should not touch it.
@@ -568,9 +568,9 @@ func testUnblockReadyFullPipeline(t *testing.T, factory StoreFactory) {
 	ctx := context.Background()
 
 	// Submit a diamond DAG: A, B depend on nothing; C depends on A and B.
-	idA := s.AddJob(ctx, "echo a", nil)
-	idB := s.AddJob(ctx, "echo b", nil)
-	idC := s.AddJob(ctx, "echo c", []string{idA, idB})
+	idA := s.AddJob(ctx, AddJobParams{Command: "echo a"})
+	idB := s.AddJob(ctx, AddJobParams{Command: "echo b"})
+	idC := s.AddJob(ctx, AddJobParams{Command: "echo c", DependsOn: []string{idA, idB}})
 
 	// Claim both A and B so we can complete them independently.
 	s.ClaimJob(ctx)

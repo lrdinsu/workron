@@ -159,7 +159,7 @@ func TestPostgres_ConcurrentClaimSkipLocked(t *testing.T) {
 	// Add 20 jobs.
 	const numJobs = 20
 	for i := 0; i < numJobs; i++ {
-		s.AddJob(ctx, "echo hello", nil)
+		s.AddJob(ctx, AddJobParams{Command: "echo hello"})
 	}
 
 	// Claim all 20 from 20 concurrent goroutines (more goroutines than jobs).
@@ -205,7 +205,7 @@ func TestPostgres_PersistenceAcrossReconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = s1.pool.Exec(ctx, "DELETE FROM jobs")
-	id := s1.AddJob(ctx, "echo persist", nil)
+	id := s1.AddJob(ctx, AddJobParams{Command: "echo persist"})
 	s1.Close()
 
 	// Second connection: verify job exists.

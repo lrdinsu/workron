@@ -133,7 +133,7 @@ func TestSQLite_PersistenceAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := s1.AddJob(ctx, "echo persist", nil)
+	id := s1.AddJob(ctx, AddJobParams{Command: "echo persist"})
 	_ = s1.Close()
 
 	// Reopen the same file.
@@ -163,8 +163,8 @@ func TestSQLite_PersistenceDependsOnSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	depID := s1.AddJob(ctx, "echo dep", nil)
-	childID := s1.AddJob(ctx, "echo child", []string{depID})
+	depID := s1.AddJob(ctx, AddJobParams{Command: "echo dep"})
+	childID := s1.AddJob(ctx, AddJobParams{Command: "echo child", DependsOn: []string{depID}})
 	_ = s1.Close()
 
 	s2, err := NewSQLiteStore(dbPath)
