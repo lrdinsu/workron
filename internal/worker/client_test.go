@@ -38,7 +38,7 @@ func TestSchedulerClient_ClaimJob(t *testing.T) {
 	}
 
 	// Add a job and claim it
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, store.AddJobParams{Command: "echo hello"})
 	job, found = client.ClaimJob(ctx)
 	if !found {
 		t.Fatal("expected to claim a job")
@@ -56,7 +56,7 @@ func TestSchedulerClient_ReportDone(t *testing.T) {
 	client, s, cleanup := newTestScheduler(t)
 	defer cleanup()
 
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, store.AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx) // move to running
 
 	err := client.ReportDone(ctx, id)
@@ -75,7 +75,7 @@ func TestSchedulerClient_ReportFail_Retries(t *testing.T) {
 	client, s, cleanup := newTestScheduler(t)
 	defer cleanup()
 
-	s.AddJob(ctx, "bad command", nil)
+	s.AddJob(ctx, store.AddJobParams{Command: "bad command"})
 	s.ClaimJob(ctx) // attempt 1 of 3
 
 	job, _ := s.GetJob(ctx, s.ListJobs(ctx)[0].ID)
@@ -96,7 +96,7 @@ func TestSchedulerClient_ReportFail_Permanent(t *testing.T) {
 	client, s, cleanup := newTestScheduler(t)
 	defer cleanup()
 
-	id := s.AddJob(ctx, "bad command", nil)
+	id := s.AddJob(ctx, store.AddJobParams{Command: "bad command"})
 
 	// Exhaust all 3 retries
 	for i := 0; i < 3; i++ {
@@ -122,7 +122,7 @@ func TestSchedulerClient_UpdateJobStatus(t *testing.T) {
 	client, s, cleanup := newTestScheduler(t)
 	defer cleanup()
 
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, store.AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx) // move to running
 
 	// UpdateJobStatus with StatusDone should call ReportDone
@@ -139,7 +139,7 @@ func TestSchedulerClient_SendHeartbeat(t *testing.T) {
 	client, s, cleanup := newTestScheduler(t)
 	defer cleanup()
 
-	id := s.AddJob(ctx, "echo hello", nil)
+	id := s.AddJob(ctx, store.AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx) // move to running
 
 	err := client.SendHeartbeat(ctx, id)

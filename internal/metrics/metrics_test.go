@@ -16,16 +16,16 @@ func TestJobGaugeCollector_CountsByStatus(t *testing.T) {
 
 	// Create jobs in various states.
 	// 2 pending (no deps, not yet claimed)
-	s.AddJob(ctx, "echo pending1", nil)
-	s.AddJob(ctx, "echo pending2", nil)
+	s.AddJob(ctx, store.AddJobParams{Command: "echo pending1"})
+	s.AddJob(ctx, store.AddJobParams{Command: "echo pending2"})
 
 	// 1 running (claimed)
-	s.AddJob(ctx, "echo running", nil)
+	s.AddJob(ctx, store.AddJobParams{Command: "echo running"})
 	s.ClaimJob(ctx)
 
 	// 1 blocked (has dependency)
-	depID := s.AddJob(ctx, "echo dep", nil)
-	s.AddJob(ctx, "echo blocked", []string{depID})
+	depID := s.AddJob(ctx, store.AddJobParams{Command: "echo dep"})
+	s.AddJob(ctx, store.AddJobParams{Command: "echo blocked", DependsOn: []string{depID}})
 
 	// Register collector with a fresh registry.
 	registry := prometheus.NewRegistry()

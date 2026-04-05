@@ -32,7 +32,7 @@ func waitForStatus(t *testing.T, s *store.MemoryStore, id string, expected store
 
 func TestWorker_ProcessesJobSuccessfully(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob(context.Background(), "echo hello", nil)
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "echo hello"})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -45,7 +45,7 @@ func TestWorker_ProcessesJobSuccessfully(t *testing.T) {
 
 func TestWorker_MarksFailedJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob(context.Background(), "thiscommanddoesnotexist", nil)
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "thiscommanddoesnotexist"})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -59,7 +59,7 @@ func TestWorker_MarksFailedJob(t *testing.T) {
 
 func TestWorker_RetriesFailedJobBeforeGivingUp(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob(context.Background(), "thiscommanddoesnotexist", nil)
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "thiscommanddoesnotexist"})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -84,7 +84,7 @@ func TestWorker_DoesNotRetryJobThatSucceeds(t *testing.T) {
 	s := store.NewMemoryStore()
 	// This command should succeed on the first attempt, so the worker
 	// should not requeue or retry it.
-	id := s.AddJob(context.Background(), "echo hello", nil)
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "echo hello"})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -134,7 +134,7 @@ func TestWorker_MultipleWorkerNoDuplicates(t *testing.T) {
 	// Submit 5 jobs
 	ids := make([]string, 5)
 	for i := range ids {
-		ids[i] = s.AddJob(context.Background(), "echo hello", nil)
+		ids[i] = s.AddJob(context.Background(), store.AddJobParams{Command: "echo hello"})
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -172,7 +172,7 @@ func TestWorker_MultipleWorkerNoDuplicates(t *testing.T) {
 
 func TestWorker_SendsHeartbeatsDuringLongJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob(context.Background(), "sleep 12", nil)
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "sleep 12"})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -201,7 +201,7 @@ func TestWorker_SendsHeartbeatsDuringLongJob(t *testing.T) {
 
 func TestWorker_HeartbeatStopsAfterJobCompletes(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob(context.Background(), "echo hello", nil) // finishes instantly
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "echo hello"}) // finishes instantly
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

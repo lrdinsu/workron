@@ -76,7 +76,7 @@ func TestHandleSubmitJob_InvalidJSON(t *testing.T) {
 
 func TestHandleGetJob_Found(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob(context.Background(), "echo hello", nil)
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "echo hello"})
 	srv := NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
 
 	r := httptest.NewRequest(http.MethodGet, "/jobs/"+id, nil)
@@ -135,8 +135,8 @@ func TestHandleListJobs_Empty(t *testing.T) {
 
 func TestHandleListJobs_WithJobs(t *testing.T) {
 	s := store.NewMemoryStore()
-	s.AddJob(context.Background(), "echo hello", nil)
-	s.AddJob(context.Background(), "echo world", nil)
+	s.AddJob(context.Background(), store.AddJobParams{Command: "echo hello"})
+	s.AddJob(context.Background(), store.AddJobParams{Command: "echo world"})
 	srv := NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
 
 	r := httptest.NewRequest(http.MethodGet, "/jobs", nil)
@@ -160,7 +160,7 @@ func TestHandleListJobs_WithJobs(t *testing.T) {
 
 func TestHandleClaimJob_ReturnsJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob(context.Background(), "echo hello", nil)
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "echo hello"})
 	srv := NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
 
 	r := httptest.NewRequest(http.MethodGet, "/jobs/next", nil)
@@ -201,7 +201,7 @@ func TestHandleClaimJob_NoJobs(t *testing.T) {
 
 func TestHandleClaimJob_SkipsRunningJobs(t *testing.T) {
 	s := store.NewMemoryStore()
-	s.AddJob(context.Background(), "echo first", nil)
+	s.AddJob(context.Background(), store.AddJobParams{Command: "echo first"})
 	srv := NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
 
 	// Claim the only job
@@ -225,7 +225,7 @@ func TestHandleClaimJob_SkipsRunningJobs(t *testing.T) {
 
 func TestHandleJobDone_Success(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob(context.Background(), "echo hello", nil)
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "echo hello"})
 
 	// Claim the job first so it's in running state
 	s.ClaimJob(context.Background())
@@ -260,7 +260,7 @@ func TestHandleJobDone_NotFound(t *testing.T) {
 
 func TestHandleJobDone_NotRunning(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob(context.Background(), "echo hello", nil) // status is pending, not running
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "echo hello"}) // status is pending, not running
 	srv := NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
 
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/done", nil)
@@ -275,7 +275,7 @@ func TestHandleJobDone_NotRunning(t *testing.T) {
 
 func TestHandleJobFail_RetriesJob(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob(context.Background(), "bad command", nil)
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "bad command"})
 
 	// Claim it (attempt 1 of 3)
 	s.ClaimJob(context.Background())
@@ -298,7 +298,7 @@ func TestHandleJobFail_RetriesJob(t *testing.T) {
 
 func TestHandleJobFail_PermanentFailure(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob(context.Background(), "bad command", nil)
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "bad command"})
 
 	// Exhaust all retries by claiming 3 times
 	for i := 0; i < 3; i++ {
@@ -329,7 +329,7 @@ func TestHandleJobFail_PermanentFailure(t *testing.T) {
 
 func TestHandleHeartbeat_Success(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob(context.Background(), "echo hello", nil)
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "echo hello"})
 	s.ClaimJob(context.Background()) // move to running
 
 	srv := NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
@@ -362,7 +362,7 @@ func TestHandleHeartbeat_NotFound(t *testing.T) {
 
 func TestHandleHeartbeat_NotRunning(t *testing.T) {
 	s := store.NewMemoryStore()
-	id := s.AddJob(context.Background(), "echo hello", nil) // status is pending, not running
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "echo hello"}) // status is pending, not running
 	srv := NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
 
 	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/heartbeat", nil)
@@ -379,7 +379,7 @@ func TestHandleHeartbeat_NotRunning(t *testing.T) {
 
 func TestHandleSubmitJob_WithDependencies(t *testing.T) {
 	s := store.NewMemoryStore()
-	depID := s.AddJob(context.Background(), "echo dep", nil)
+	depID := s.AddJob(context.Background(), store.AddJobParams{Command: "echo dep"})
 	srv := NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
 
 	body := bytes.NewBufferString(`{"command": "echo child", "depends_on": ["` + depID + `"]}`)
@@ -444,8 +444,8 @@ func TestHandleSubmitJob_NonexistentDependency(t *testing.T) {
 
 func TestHandleJobDone_UnblocksDownstream(t *testing.T) {
 	s := store.NewMemoryStore()
-	depID := s.AddJob(context.Background(), "echo dep", nil)
-	childID := s.AddJob(context.Background(), "echo child", []string{depID})
+	depID := s.AddJob(context.Background(), store.AddJobParams{Command: "echo dep"})
+	childID := s.AddJob(context.Background(), store.AddJobParams{Command: "echo child", DependsOn: []string{depID}})
 	srv := NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
 
 	// Claim and complete the dependency via HTTP.
@@ -491,9 +491,9 @@ func TestHandleJobDone_UnblocksDownstream(t *testing.T) {
 
 func TestHandleJobDone_DoesNotUnblockPartialDeps(t *testing.T) {
 	s := store.NewMemoryStore()
-	dep1 := s.AddJob(context.Background(), "echo a", nil)
-	dep2 := s.AddJob(context.Background(), "echo b", nil)
-	childID := s.AddJob(context.Background(), "echo child", []string{dep1, dep2})
+	dep1 := s.AddJob(context.Background(), store.AddJobParams{Command: "echo a"})
+	dep2 := s.AddJob(context.Background(), store.AddJobParams{Command: "echo b"})
+	childID := s.AddJob(context.Background(), store.AddJobParams{Command: "echo child", DependsOn: []string{dep1, dep2}})
 	srv := NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
 
 	// Claim both so we can complete just one.
