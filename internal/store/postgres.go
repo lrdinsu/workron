@@ -119,6 +119,13 @@ func pgMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 // --- JobStore implementation ---
 
+// pgJobColumns is the canonical column list for all job SELECT queries.
+const pgJobColumns = `id, command, status, created_at, started_at, done_at,
+	last_heartbeat, max_retries, attempts, depends_on,
+	resources, worker_id, priority, queue_name,
+	gang_id, gang_size, gang_index,
+	checkpoint, outputs, reservation_epoch, preemption_epoch`
+
 func (s *PostgresStore) AddJob(ctx context.Context, params AddJobParams) string {
 	id := generateID()
 	now := time.Now()
@@ -137,10 +144,21 @@ func (s *PostgresStore) AddJob(ctx context.Context, params AddJobParams) string 
 		panic(fmt.Sprintf("postgres: marshal depends_on: %v", err))
 	}
 
+	var resourcesJSON []byte
+	if params.Resources != nil {
+		resourcesJSON, err = json.Marshal(params.Resources)
+		if err != nil {
+			panic(fmt.Sprintf("postgres: marshal resources: %v", err))
+		}
+	}
+
 	_, err = s.pool.Exec(ctx,
-		`INSERT INTO jobs (id, command, status, created_at, max_retries, attempts, depends_on)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+		`INSERT INTO jobs (id, command, status, created_at, max_retries, attempts, depends_on,
+		                    resources, priority, queue_name, gang_id, gang_size, gang_index)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12, $13)`,
 		id, params.Command, string(status), now, 3, 0, string(depsJSON),
+		resourcesJSON, params.Priority, params.QueueName,
+		params.GangID, params.GangSize, params.GangIndex,
 	)
 	if err != nil {
 		panic(fmt.Sprintf("postgres: add job: %v", err))
@@ -151,9 +169,7 @@ func (s *PostgresStore) AddJob(ctx context.Context, params AddJobParams) string 
 
 func (s *PostgresStore) GetJob(ctx context.Context, id string) (*Job, bool) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT id, command, status, created_at, started_at, done_at,
-		        last_heartbeat, max_retries, attempts, depends_on
-		 FROM jobs WHERE id = $1`, id,
+		`SELECT `+pgJobColumns+` FROM jobs WHERE id = $1`, id,
 	)
 	return pgScanJob(row)
 }
@@ -171,7 +187,10 @@ func (s *PostgresStore) ClaimJob(ctx context.Context) (*Job, bool) {
 		FROM claimed
 		WHERE jobs.id = claimed.id
 		RETURNING jobs.id, jobs.command, jobs.status, jobs.created_at, jobs.started_at,
-		          jobs.done_at, jobs.last_heartbeat, jobs.max_retries, jobs.attempts, jobs.depends_on`,
+		          jobs.done_at, jobs.last_heartbeat, jobs.max_retries, jobs.attempts, jobs.depends_on,
+		          jobs.resources, jobs.worker_id, jobs.priority, jobs.queue_name,
+		          jobs.gang_id, jobs.gang_size, jobs.gang_index,
+		          jobs.checkpoint, jobs.outputs, jobs.reservation_epoch, jobs.preemption_epoch`,
 		time.Now(),
 	)
 	return pgScanJob(row)
@@ -194,14 +213,11 @@ func (s *PostgresStore) UpdateJobStatus(ctx context.Context, id string, status J
 }
 
 func (s *PostgresStore) ListJobs(ctx context.Context) []*Job {
-	return s.pgQueryJobs(ctx, `SELECT id, command, status, created_at, started_at, done_at,
-	                              last_heartbeat, max_retries, attempts, depends_on FROM jobs`)
+	return s.pgQueryJobs(ctx, `SELECT `+pgJobColumns+` FROM jobs`)
 }
 
 func (s *PostgresStore) ListRunningJobs(ctx context.Context) []*Job {
-	return s.pgQueryJobs(ctx, `SELECT id, command, status, created_at, started_at, done_at,
-	                              last_heartbeat, max_retries, attempts, depends_on
-	                       FROM jobs WHERE status = 'running'`)
+	return s.pgQueryJobs(ctx, `SELECT `+pgJobColumns+` FROM jobs WHERE status = 'running'`)
 }
 
 func (s *PostgresStore) UpdateHeartbeat(ctx context.Context, id string) {
@@ -238,18 +254,41 @@ func (s *PostgresStore) UnblockReady(ctx context.Context) {
 
 // --- Scan helpers ---
 
+// pgPopulateJob fills a Job's JSON and nullable fields after scanning raw values.
+func pgPopulateJob(j *Job, status string, depsJSON, resourcesJSON, checkpointJSON, outputsJSON []byte) {
+	j.Status = JobStatus(status)
+	if err := json.Unmarshal(depsJSON, &j.DependsOn); err != nil {
+		panic(fmt.Sprintf("postgres: unmarshal depends_on: %v", err))
+	}
+	if len(resourcesJSON) > 0 {
+		var r ResourceSpec
+		if err := json.Unmarshal(resourcesJSON, &r); err != nil {
+			panic(fmt.Sprintf("postgres: unmarshal resources: %v", err))
+		}
+		j.Resources = &r
+	}
+	if len(checkpointJSON) > 0 {
+		j.Checkpoint = json.RawMessage(checkpointJSON)
+	}
+	if len(outputsJSON) > 0 {
+		j.Outputs = json.RawMessage(outputsJSON)
+	}
+}
+
 // pgScanJob scans a single pgx row into a Job.
-// Column order must match: id, command, status, created_at, started_at,
-// done_at, last_heartbeat, max_retries, attempts, depends_on.
+// Column order must match pgJobColumns.
 func pgScanJob(row pgx.Row) (*Job, bool) {
 	var j Job
 	var status string
-	var depsJSON []byte
+	var depsJSON, resourcesJSON, checkpointJSON, outputsJSON []byte
 
 	err := row.Scan(
 		&j.ID, &j.Command, &status, &j.CreatedAt,
 		&j.StartedAt, &j.DoneAt, &j.LastHeartbeat,
 		&j.MaxRetries, &j.Attempts, &depsJSON,
+		&resourcesJSON, &j.WorkerID, &j.Priority, &j.QueueName,
+		&j.GangID, &j.GangSize, &j.GangIndex,
+		&checkpointJSON, &outputsJSON, &j.ReservationEpoch, &j.PreemptionEpoch,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, false
@@ -258,11 +297,7 @@ func pgScanJob(row pgx.Row) (*Job, bool) {
 		panic(fmt.Sprintf("postgres: scan job: %v", err))
 	}
 
-	j.Status = JobStatus(status)
-	if err := json.Unmarshal(depsJSON, &j.DependsOn); err != nil {
-		panic(fmt.Sprintf("postgres: unmarshal depends_on: %v", err))
-	}
-
+	pgPopulateJob(&j, status, depsJSON, resourcesJSON, checkpointJSON, outputsJSON)
 	return &j, true
 }
 
@@ -278,20 +313,20 @@ func (s *PostgresStore) pgQueryJobs(ctx context.Context, query string, args ...a
 	for rows.Next() {
 		var j Job
 		var status string
-		var depsJSON []byte
+		var depsJSON, resourcesJSON, checkpointJSON, outputsJSON []byte
 
 		if err := rows.Scan(
 			&j.ID, &j.Command, &status, &j.CreatedAt,
 			&j.StartedAt, &j.DoneAt, &j.LastHeartbeat,
 			&j.MaxRetries, &j.Attempts, &depsJSON,
+			&resourcesJSON, &j.WorkerID, &j.Priority, &j.QueueName,
+			&j.GangID, &j.GangSize, &j.GangIndex,
+			&checkpointJSON, &outputsJSON, &j.ReservationEpoch, &j.PreemptionEpoch,
 		); err != nil {
 			panic(fmt.Sprintf("postgres: scan job row: %v", err))
 		}
 
-		j.Status = JobStatus(status)
-		if err := json.Unmarshal(depsJSON, &j.DependsOn); err != nil {
-			panic(fmt.Sprintf("postgres: unmarshal depends_on: %v", err))
-		}
+		pgPopulateJob(&j, status, depsJSON, resourcesJSON, checkpointJSON, outputsJSON)
 		jobs = append(jobs, &j)
 	}
 
