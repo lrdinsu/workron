@@ -116,6 +116,41 @@ func TestMemory_UnblockReadyFullPipeline(t *testing.T) {
 	testUnblockReadyFullPipeline(t, newTestMemoryStore)
 }
 
+// --- WorkerStore compliance tests ---
+
+func newTestMemoryWorkerStore(t *testing.T) WorkerStore {
+	t.Helper()
+	return NewMemoryStore()
+}
+
+func TestMemory_RegisterWorker(t *testing.T) {
+	testRegisterWorker(t, newTestMemoryWorkerStore)
+}
+
+func TestMemory_RegisterWorkerUpsert(t *testing.T) {
+	testRegisterWorkerUpsert(t, newTestMemoryWorkerStore)
+}
+
+func TestMemory_WorkerHeartbeat(t *testing.T) {
+	testWorkerHeartbeat(t, newTestMemoryWorkerStore)
+}
+
+func TestMemory_WorkerHeartbeatNotFound(t *testing.T) {
+	testWorkerHeartbeatNotFound(t, newTestMemoryWorkerStore)
+}
+
+func TestMemory_ListWorkers(t *testing.T) {
+	testListWorkers(t, newTestMemoryWorkerStore)
+}
+
+func TestMemory_ListActiveWorkers(t *testing.T) {
+	testListActiveWorkers(t, newTestMemoryWorkerStore)
+}
+
+func TestMemory_RemoveStaleWorkers(t *testing.T) {
+	testRemoveStaleWorkers(t, newTestMemoryWorkerStore)
+}
+
 func TestMemoryStore_AddAndClaimJob(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()

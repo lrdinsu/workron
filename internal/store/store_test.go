@@ -603,3 +603,173 @@ func testUnblockReadyFullPipeline(t *testing.T, factory StoreFactory) {
 		t.Errorf("claimed %q, want %q", job.ID, idC)
 	}
 }
+
+// --- WorkerStore compliance tests ---
+
+// WorkerStoreFactory creates a fresh WorkerStore for each test.
+type WorkerStoreFactory func(t *testing.T) WorkerStore
+
+func testRegisterWorker(t *testing.T, factory WorkerStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	err := s.RegisterWorker(ctx, Worker{
+		ID:        "w-1",
+		ExecAddr:  "localhost:9000",
+		Resources: ResourceSpec{VRAMMB: 8192, MemoryMB: 4096},
+		Tags:      []string{"gpu"},
+	})
+	if err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+
+	w, found := s.GetWorker(ctx, "w-1")
+	if !found {
+		t.Fatal("expected to find worker w-1")
+	}
+	if w.ExecAddr != "localhost:9000" {
+		t.Errorf("ExecAddr = %q, want %q", w.ExecAddr, "localhost:9000")
+	}
+	if w.Resources.VRAMMB != 8192 {
+		t.Errorf("VRAMMB = %d, want 8192", w.Resources.VRAMMB)
+	}
+	if w.Status != WorkerActive {
+		t.Errorf("Status = %q, want %q", w.Status, WorkerActive)
+	}
+	if w.LastHeartbeat.IsZero() {
+		t.Error("LastHeartbeat should be set")
+	}
+	if w.RegisteredAt.IsZero() {
+		t.Error("RegisteredAt should be set")
+	}
+}
+
+func testRegisterWorkerUpsert(t *testing.T, factory WorkerStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	_ = s.RegisterWorker(ctx, Worker{ID: "w-1", ExecAddr: "host:1000"})
+	first, _ := s.GetWorker(ctx, "w-1")
+	origRegisteredAt := first.RegisteredAt
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Re-register same ID with different addr
+	_ = s.RegisterWorker(ctx, Worker{ID: "w-1", ExecAddr: "host:2000"})
+	second, _ := s.GetWorker(ctx, "w-1")
+
+	if second.ExecAddr != "host:2000" {
+		t.Errorf("ExecAddr = %q, want %q after upsert", second.ExecAddr, "host:2000")
+	}
+	if !second.RegisteredAt.Equal(origRegisteredAt) {
+		t.Error("RegisteredAt should be preserved on upsert")
+	}
+
+	// Should still be only 1 worker
+	all := s.ListWorkers(ctx)
+	if len(all) != 1 {
+		t.Errorf("ListWorkers len = %d, want 1", len(all))
+	}
+}
+
+func testWorkerHeartbeat(t *testing.T, factory WorkerStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	_ = s.RegisterWorker(ctx, Worker{ID: "w-1", ExecAddr: "host:1000"})
+	before, _ := s.GetWorker(ctx, "w-1")
+
+	time.Sleep(10 * time.Millisecond)
+
+	err := s.WorkerHeartbeat(ctx, "w-1")
+	if err != nil {
+		t.Fatalf("WorkerHeartbeat: %v", err)
+	}
+
+	after, _ := s.GetWorker(ctx, "w-1")
+	if !after.LastHeartbeat.After(before.LastHeartbeat) {
+		t.Error("LastHeartbeat should advance after heartbeat")
+	}
+}
+
+func testWorkerHeartbeatNotFound(t *testing.T, factory WorkerStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	err := s.WorkerHeartbeat(ctx, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for heartbeat on unregistered worker")
+	}
+}
+
+func testListWorkers(t *testing.T, factory WorkerStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	_ = s.RegisterWorker(ctx, Worker{ID: "w-1", ExecAddr: "host:1"})
+	_ = s.RegisterWorker(ctx, Worker{ID: "w-2", ExecAddr: "host:2"})
+	_ = s.RegisterWorker(ctx, Worker{ID: "w-3", ExecAddr: "host:3"})
+
+	all := s.ListWorkers(ctx)
+	if len(all) != 3 {
+		t.Errorf("ListWorkers len = %d, want 3", len(all))
+	}
+}
+
+func testListActiveWorkers(t *testing.T, factory WorkerStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	_ = s.RegisterWorker(ctx, Worker{ID: "w-1", ExecAddr: "host:1"})
+	_ = s.RegisterWorker(ctx, Worker{ID: "w-2", ExecAddr: "host:2"})
+
+	// Make w-1 stale and remove it
+	ms := s.(*MemoryStore)
+	ms.SetWorkerHeartbeat("w-1", time.Now().Add(-2*time.Minute))
+	s.RemoveStaleWorkers(ctx, 60*time.Second)
+
+	active := s.ListActiveWorkers(ctx)
+	if len(active) != 1 {
+		t.Errorf("ListActiveWorkers len = %d, want 1", len(active))
+	}
+	if active[0].ID != "w-2" {
+		t.Errorf("active worker ID = %q, want %q", active[0].ID, "w-2")
+	}
+}
+
+func testRemoveStaleWorkers(t *testing.T, factory WorkerStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	_ = s.RegisterWorker(ctx, Worker{ID: "w-1", ExecAddr: "host:1"})
+	_ = s.RegisterWorker(ctx, Worker{ID: "w-2", ExecAddr: "host:2"})
+
+	// Make both stale
+	ms := s.(*MemoryStore)
+	staleTime := time.Now().Add(-5 * time.Minute)
+	ms.SetWorkerHeartbeat("w-1", staleTime)
+	ms.SetWorkerHeartbeat("w-2", staleTime)
+
+	count := s.RemoveStaleWorkers(ctx, 60*time.Second)
+	if count != 2 {
+		t.Errorf("RemoveStaleWorkers = %d, want 2", count)
+	}
+
+	w1, _ := s.GetWorker(ctx, "w-1")
+	if w1.Status != WorkerOffline {
+		t.Errorf("w-1 status = %q, want %q", w1.Status, WorkerOffline)
+	}
+
+	// Calling again should return 0 (already offline)
+	count = s.RemoveStaleWorkers(ctx, 60*time.Second)
+	if count != 0 {
+		t.Errorf("second RemoveStaleWorkers = %d, want 0", count)
+	}
+}
