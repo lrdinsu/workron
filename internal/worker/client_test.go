@@ -142,9 +142,12 @@ func TestSchedulerClient_SendHeartbeat(t *testing.T) {
 	id := s.AddJob(ctx, store.AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx) // move to running
 
-	err := client.SendHeartbeat(ctx, id)
+	action, err := client.SendHeartbeat(ctx, id)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if action != "" {
+		t.Errorf("expected empty action, got %q", action)
 	}
 
 	job, _ := s.GetJob(ctx, id)
