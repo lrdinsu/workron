@@ -1,7 +1,9 @@
 package worker
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -14,16 +16,24 @@ func NewExecutor() *Executor {
 	return &Executor{}
 }
 
-// Execute runs a shell command string and return an error if it fails
-// It captures stdout and stderr so failure reasons are visible in logs
-func (e *Executor) Execute(command string) error {
+// Execute runs a shell command string and return an error if it fails.
+// The context enables cancellation (e.g. for preemption).
+// If env is non-nil, its key=value pairs are appended to the process environment.
+func (e *Executor) Execute(ctx context.Context, command string, env map[string]string) error {
 	parts := strings.Fields(command)
 	if len(parts) == 0 {
 		return fmt.Errorf("empty command")
 	}
 
 	// parts[0] is the program, parts[1:] are the arguments
-	cmd := exec.Command(parts[0], parts[1:]...)
+	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
+
+	if len(env) > 0 {
+		cmd.Env = os.Environ()
+		for k, v := range env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
 
 	// CombinedOutput runs the command and captures stdout + stderr together
 	output, err := cmd.CombinedOutput()
@@ -32,5 +42,4 @@ func (e *Executor) Execute(command string) error {
 	}
 
 	return nil
-
 }
