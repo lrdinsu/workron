@@ -25,12 +25,53 @@ type JobStore interface {
 type JobStatus string
 
 const (
-	StatusPending JobStatus = "pending"
-	StatusBlocked JobStatus = "blocked"
-	StatusRunning JobStatus = "running"
-	StatusDone    JobStatus = "done"
-	StatusFailed  JobStatus = "failed"
+	StatusPending    JobStatus = "pending"
+	StatusBlocked    JobStatus = "blocked"
+	StatusRunning    JobStatus = "running"
+	StatusDone       JobStatus = "done"
+	StatusFailed     JobStatus = "failed"
+	StatusReserved   JobStatus = "reserved"
+	StatusPreempting JobStatus = "preempting"
+	StatusPreempted  JobStatus = "preempted"
 )
+
+// ResourceSpec describes the resources a job requires or a worker provides.
+type ResourceSpec struct {
+	VRAMMB   int `json:"vram_mb,omitempty"`
+	MemoryMB int `json:"memory_mb,omitempty"`
+}
+
+// AddJobParams holds all parameters for creating a new job.
+// Only Command is required; everything else defaults to zero values.
+type AddJobParams struct {
+	Command   string        `json:"command"`
+	DependsOn []string      `json:"depends_on,omitempty"`
+	Resources *ResourceSpec `json:"resources,omitempty"`
+	Priority  int           `json:"priority,omitempty"`
+	QueueName string        `json:"queue_name,omitempty"`
+	GangID    string        `json:"gang_id,omitempty"`
+	GangSize  int           `json:"gang_size,omitempty"`
+	GangIndex int           `json:"gang_index,omitempty"`
+}
+
+// WorkerStatus defines the valid states for a worker node.
+type WorkerStatus string
+
+const (
+	WorkerActive  WorkerStatus = "active"
+	WorkerOffline WorkerStatus = "offline"
+)
+
+// Worker represents a registered worker node in the cluster.
+type Worker struct {
+	ID            string       `json:"id"`
+	ExecAddr      string       `json:"exec_addr"`
+	Resources     ResourceSpec `json:"resources"`
+	Tags          []string     `json:"tags,omitempty"`
+	Status        WorkerStatus `json:"status"`
+	LastHeartbeat time.Time    `json:"last_heartbeat"`
+	RegisteredAt  time.Time    `json:"registered_at"`
+}
 
 // Job represents a single command to be executed
 type Job struct {
