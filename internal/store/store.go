@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -75,16 +76,27 @@ type Worker struct {
 
 // Job represents a single command to be executed
 type Job struct {
-	ID            string     `json:"id"`
-	Command       string     `json:"command"`
-	Status        JobStatus  `json:"status"`
-	CreatedAt     time.Time  `json:"created_at"`
-	StartedAt     *time.Time `json:"started_at,omitempty"`
-	DoneAt        *time.Time `json:"done_at,omitempty"`
-	LastHeartbeat *time.Time `json:"last_heart_beat,omitempty"`
-	MaxRetries    int        `json:"max_retries"`
-	Attempts      int        `json:"attempts"`
-	DependsOn     []string   `json:"depends_on,omitempty"`
+	ID               string          `json:"id"`
+	Command          string          `json:"command"`
+	Status           JobStatus       `json:"status"`
+	CreatedAt        time.Time       `json:"created_at"`
+	StartedAt        *time.Time      `json:"started_at,omitempty"`
+	DoneAt           *time.Time      `json:"done_at,omitempty"`
+	LastHeartbeat    *time.Time      `json:"last_heart_beat,omitempty"`
+	MaxRetries       int             `json:"max_retries"`
+	Attempts         int             `json:"attempts"`
+	DependsOn        []string        `json:"depends_on,omitempty"`
+	Resources        *ResourceSpec   `json:"resources,omitempty"`
+	WorkerID         string          `json:"worker_id,omitempty"`
+	Priority         int             `json:"priority,omitempty"`
+	QueueName        string          `json:"queue_name,omitempty"`
+	GangID           string          `json:"gang_id,omitempty"`
+	GangSize         int             `json:"gang_size,omitempty"`
+	GangIndex        int             `json:"gang_index,omitempty"`
+	Checkpoint       json.RawMessage `json:"checkpoint,omitempty"`
+	Outputs          json.RawMessage `json:"outputs,omitempty"`
+	ReservationEpoch int             `json:"reservation_epoch,omitempty"`
+	PreemptionEpoch  int             `json:"preemption_epoch,omitempty"`
 }
 
 // ReaperLocker is an optional interface that storage backends can implement
@@ -98,6 +110,18 @@ type ReaperLocker interface {
 	// if successful, executes fn while holding it. Returns true if the lock
 	// was acquired (and fn was called), false if another instance holds it.
 	WithReaperLock(ctx context.Context, fn func(ctx context.Context)) (acquired bool, err error)
+}
+
+// WorkerStore defines operations for managing worker nodes.
+// Like ReaperLocker, this is an optional interface discovered via type assertion.
+// All three store backends (Memory, SQLite, Postgres) implement it.
+type WorkerStore interface {
+	RegisterWorker(ctx context.Context, w Worker) error
+	WorkerHeartbeat(ctx context.Context, workerID string) error
+	GetWorker(ctx context.Context, workerID string) (*Worker, bool)
+	ListWorkers(ctx context.Context) []*Worker
+	ListActiveWorkers(ctx context.Context) []*Worker
+	RemoveStaleWorkers(ctx context.Context, timeout time.Duration) int
 }
 
 // generateID returns a unique job ID using a UUID v4.
