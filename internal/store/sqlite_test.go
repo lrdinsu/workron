@@ -122,6 +122,28 @@ func TestSQLite_UnblockReadyFullPipeline(t *testing.T) {
 	testUnblockReadyFullPipeline(t, newTestSQLiteStore)
 }
 
+// --- New Job fields compliance tests ---
+
+func TestSQLite_AddJobWithResources(t *testing.T) {
+	testAddJobWithResources(t, newTestSQLiteStore)
+}
+
+func TestSQLite_AddJobWithPriority(t *testing.T) {
+	testAddJobWithPriority(t, newTestSQLiteStore)
+}
+
+func TestSQLite_AddJobWithQueueName(t *testing.T) {
+	testAddJobWithQueueName(t, newTestSQLiteStore)
+}
+
+func TestSQLite_AddJobWithGangFields(t *testing.T) {
+	testAddJobWithGangFields(t, newTestSQLiteStore)
+}
+
+func TestSQLite_AddJobDefaultFields(t *testing.T) {
+	testAddJobDefaultFields(t, newTestSQLiteStore)
+}
+
 // --- SQLite-specific tests ---
 
 func TestSQLite_PersistenceAcrossReopen(t *testing.T) {

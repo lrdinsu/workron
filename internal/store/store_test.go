@@ -787,3 +787,114 @@ func testRemoveStaleWorkers(t *testing.T, factory WorkerStoreFactory) {
 		t.Errorf("second RemoveStaleWorkers = %d, want 0", count)
 	}
 }
+
+// --- Compliance tests: new Job fields round-trip ---
+
+func testAddJobWithResources(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	id := s.AddJob(ctx, AddJobParams{
+		Command:   "echo gpu-job",
+		Resources: &ResourceSpec{VRAMMB: 8192, MemoryMB: 4096},
+	})
+
+	job, found := s.GetJob(ctx, id)
+	if !found {
+		t.Fatal("expected to find job")
+	}
+	if job.Resources == nil {
+		t.Fatal("Resources is nil, want non-nil")
+	}
+	if job.Resources.VRAMMB != 8192 {
+		t.Errorf("VRAMMB = %d, want 8192", job.Resources.VRAMMB)
+	}
+	if job.Resources.MemoryMB != 4096 {
+		t.Errorf("MemoryMB = %d, want 4096", job.Resources.MemoryMB)
+	}
+}
+
+func testAddJobWithPriority(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	id := s.AddJob(ctx, AddJobParams{
+		Command:  "echo priority-job",
+		Priority: 5,
+	})
+
+	job, _ := s.GetJob(ctx, id)
+	if job.Priority != 5 {
+		t.Errorf("Priority = %d, want 5", job.Priority)
+	}
+}
+
+func testAddJobWithQueueName(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	id := s.AddJob(ctx, AddJobParams{
+		Command:   "echo queued-job",
+		QueueName: "training",
+	})
+
+	job, _ := s.GetJob(ctx, id)
+	if job.QueueName != "training" {
+		t.Errorf("QueueName = %q, want %q", job.QueueName, "training")
+	}
+}
+
+func testAddJobWithGangFields(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	id := s.AddJob(ctx, AddJobParams{
+		Command:   "echo gang-job",
+		GangID:    "gang-abc",
+		GangSize:  4,
+		GangIndex: 2,
+	})
+
+	job, _ := s.GetJob(ctx, id)
+	if job.GangID != "gang-abc" {
+		t.Errorf("GangID = %q, want %q", job.GangID, "gang-abc")
+	}
+	if job.GangSize != 4 {
+		t.Errorf("GangSize = %d, want 4", job.GangSize)
+	}
+	if job.GangIndex != 2 {
+		t.Errorf("GangIndex = %d, want 2", job.GangIndex)
+	}
+}
+
+func testAddJobDefaultFields(t *testing.T, factory StoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	id := s.AddJob(ctx, AddJobParams{Command: "echo minimal"})
+
+	job, _ := s.GetJob(ctx, id)
+	if job.Resources != nil {
+		t.Errorf("Resources = %+v, want nil", job.Resources)
+	}
+	if job.Priority != 0 {
+		t.Errorf("Priority = %d, want 0", job.Priority)
+	}
+	if job.QueueName != "" {
+		t.Errorf("QueueName = %q, want empty", job.QueueName)
+	}
+	if job.GangID != "" {
+		t.Errorf("GangID = %q, want empty", job.GangID)
+	}
+	if job.GangSize != 0 {
+		t.Errorf("GangSize = %d, want 0", job.GangSize)
+	}
+	if job.GangIndex != 0 {
+		t.Errorf("GangIndex = %d, want 0", job.GangIndex)
+	}
+}

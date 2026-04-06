@@ -1,6 +1,6 @@
 # Workron
 
-A lightweight distributed job scheduler written in Go.
+A distributed job scheduler written in Go, designed for ML and batch workloads.
 
 ---
 
@@ -12,7 +12,7 @@ Jobs can declare dependencies on other jobs, forming a DAG (directed acyclic gra
 
 Jobs are persisted to SQLite or PostgreSQL, so in-flight and completed work survives a full scheduler restart. PostgreSQL uses `FOR UPDATE SKIP LOCKED` for safe concurrent job claiming across multiple connections, preparing for multi-scheduler deployments. An in-memory store is also available for development and testing.
 
-Workers send periodic heartbeats while processing jobs. A background reaper on the scheduler detects stale heartbeats and re-queues orphaned jobs, ensuring no work is silently lost when a worker crashes.
+Workers register with the scheduler on startup, reporting their resource capacity (VRAM, memory) and execution address. Workers send periodic heartbeats while processing jobs. A background reaper on the scheduler detects stale job heartbeats and re-queues orphaned jobs, and marks workers with stale heartbeats as offline, ensuring no work is silently lost when a worker crashes.
 
 If you are curious about the design decisions and trade-offs behind this project, I wrote about the journey here:
 
@@ -20,6 +20,8 @@ If you are curious about the design decisions and trade-offs behind this project
 - 📝 [Building the Concurrent Monolith: Atomic Job Claiming in Go](https://lrdinsu.github.io/posts/building-concurrent-monolith-atomic-job-claiming-go/)
 - 📝 [Splitting and Surviving Failures: HTTP Workers and Heartbeat Detection in Go](https://lrdinsu.github.io/posts/splitting-and-surviving-failures-workron/)
 - 📝 [Surviving the Crash: Adding SQLite Persistence Without Touching Business Logic](https://lrdinsu.github.io/posts/persisting-jobs-with-sqlite-workron/)
+- 📝 [DAG Dependencies: Teaching a Job Scheduler to Wait](https://lrdinsu.github.io/posts/dag-dependencies-workron/)
+
 
 ---
 
@@ -38,12 +40,15 @@ If you are curious about the design decisions and trade-offs behind this project
 - Request ID tracing: UUID per HTTP request, `X-Request-ID` response header, request-scoped logger via context
 - Multi-scheduler coordination: multiple scheduler instances can share one PostgreSQL database safely. Job claiming uses `FOR UPDATE SKIP LOCKED`, reaper uses a transaction-scoped advisory lock (`pg_try_advisory_xact_lock`) so only one instance runs heartbeat timeout detection at a time. If the leader crashes, the lock auto-releases and another instance picks up.
 - Health endpoint: `GET /health` returns instance ID, uptime, and status for load balancer checks and debugging multi-scheduler deployments
+- Job resource requirements: jobs declare VRAM and memory needs, with priority and queue assignment
+- Worker registration: workers register via HTTP with resource capacity (VRAM, memory), execution address, and tags. The scheduler tracks worker liveness and marks stale workers as offline.
+- Gang scheduling fields: jobs carry gang ID, size, and index for coordinated multi-worker execution
+- Checkpoint and output fields: jobs carry opaque JSON for checkpoint/resume and output tracking
 
-**Planned — ML Infrastructure**
-- [ ] Job resource requirements (GPU, VRAM, CPU, memory) and job output tracking
-- [ ] Worker registration with resource capacity reporting
-- [ ] Resource-aware scheduling with bin-packing placement
-- [ ] ML pipeline demo (DAG with mixed CPU/GPU steps and artifact references)
+**Planned — Scheduling Intelligence**
+- [ ] Gang scheduling: atomic all-or-nothing reservation of N workers for distributed workloads
+- [ ] Priority-based preemption with checkpoint/resume
+- [ ] Queue resource quotas with cross-queue borrowing
 
 **Planned — Execution Semantics**
 - [ ] Job cancellation (with cascading cancel for DAGs)
@@ -69,6 +74,17 @@ With dependencies:
 Submit ──► blocked ──► pending ──► running ──► done
             (waits for all         (normal lifecycle)
              deps to be done)
+
+Future (gang scheduling + preemption):
+
+Submit ──► blocked ──► pending ──► reserved ──► running ──► done
+                                   (gang:        (worker
+                                    assigned      executing)
+                                    worker,
+                                    awaiting      running ──► preempting ──► preempted
+                                    claim)        (SIGTERM     (checkpoint
+                                                   sent)       saved, re-queued
+                                                               as pending)
 ```
 
 ### Standalone Mode
@@ -244,6 +260,16 @@ Response (`201 Created`):
 
 The job starts as `blocked` and transitions to `pending` automatically once all dependencies reach `done`. Returns `400` if any dependency ID does not exist or if the dependency graph would contain a cycle.
 
+### Submit a job with resource requirements
+
+```bash
+curl -X POST http://localhost:8080/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"command": "python train.py", "resources": {"vram_mb": 16384, "memory_mb": 32768}, "priority": 5, "queue_name": "training"}'
+```
+
+Jobs can declare VRAM and memory requirements, a priority level (higher is more important), and a queue name. These fields are stored and returned on the job, ready for resource-aware scheduling in a future PR.
+
 ### Submit a pipeline
 
 ```bash
@@ -318,6 +344,43 @@ Response (`200 OK`):
 
 Each scheduler instance generates a unique short ID at startup. Useful for load balancer health checks and identifying which instance you're talking to in multi-scheduler deployments.
 
+### Register a worker
+
+```bash
+curl -X POST http://localhost:8080/workers/register \
+  -H "Content-Type: application/json" \
+  -d '{"id": "worker-1", "exec_addr": "192.168.1.10:9000", "resources": {"vram_mb": 24576, "memory_mb": 65536}, "tags": ["gpu", "a100"]}'
+```
+
+Response (`201 Created`):
+```json
+{
+  "id": "worker-1",
+  "exec_addr": "192.168.1.10:9000",
+  "resources": {"vram_mb": 24576, "memory_mb": 65536},
+  "tags": ["gpu", "a100"],
+  "status": "active",
+  "last_heartbeat": "2026-04-05T12:00:00Z",
+  "registered_at": "2026-04-05T12:00:00Z"
+}
+```
+
+### Worker heartbeat
+
+```bash
+curl -X POST http://localhost:8080/workers/worker-1/heartbeat
+```
+
+Returns `200` on success, `404` if worker not found.
+
+### List workers
+
+```bash
+curl http://localhost:8080/workers
+```
+
+Returns all registered workers with their current status and resource capacity.
+
 ### Prometheus metrics
 
 ```bash
@@ -354,6 +417,8 @@ When a worker crashes mid-job, the scheduler detects it through missing heartbea
 - If retries are exhausted, the job is marked as permanently `failed`
 
 This ensures no job gets stuck in `running` forever, even if a worker process is killed without warning.
+
+The reaper also checks worker heartbeats. Workers that haven't sent a heartbeat within 60 seconds are marked as `offline`. This is separate from job heartbeats: a worker might be healthy but a specific job process could have hung, or a worker might go down entirely. Both cases are detected and handled.
 
 ---
 
@@ -398,7 +463,7 @@ workron/
 │   │   ├── collector.go         # Custom gauge collector (queries store on scrape)
 │   │   └── metrics_test.go
 │   ├── store/
-│   │   ├── store.go             # JobStore interface, Job struct, JobStatus
+│   │   ├── store.go             # JobStore, WorkerStore interfaces, Job/Worker structs
 │   │   ├── memory.go            # In-memory store implementation
 │   │   ├── memory_test.go
 │   │   ├── sqlite.go            # SQLite store implementation
@@ -416,7 +481,7 @@ workron/
 │   └── worker/
 │       ├── worker.go            # Poll and execute loop
 │       ├── worker_test.go
-│       ├── executor.go          # Runs shell commands via os/exec
+│       ├── executor.go          # Runs shell commands via os/exec (context-cancelable, env injection)
 │       ├── executor_test.go
 │       ├── client.go            # HTTP client for talking to scheduler
 │       └── client_test.go

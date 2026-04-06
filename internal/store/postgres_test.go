@@ -140,6 +140,28 @@ func TestPostgres_UnblockReadyFullPipeline(t *testing.T) {
 	testUnblockReadyFullPipeline(t, newTestPostgresStore)
 }
 
+// --- New Job fields compliance tests ---
+
+func TestPostgres_AddJobWithResources(t *testing.T) {
+	testAddJobWithResources(t, newTestPostgresStore)
+}
+
+func TestPostgres_AddJobWithPriority(t *testing.T) {
+	testAddJobWithPriority(t, newTestPostgresStore)
+}
+
+func TestPostgres_AddJobWithQueueName(t *testing.T) {
+	testAddJobWithQueueName(t, newTestPostgresStore)
+}
+
+func TestPostgres_AddJobWithGangFields(t *testing.T) {
+	testAddJobWithGangFields(t, newTestPostgresStore)
+}
+
+func TestPostgres_AddJobDefaultFields(t *testing.T) {
+	testAddJobDefaultFields(t, newTestPostgresStore)
+}
+
 // --- PostgreSQL-specific tests ---
 
 // TestPostgres_ConcurrentClaimSkipLocked verifies that FOR UPDATE SKIP LOCKED

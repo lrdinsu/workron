@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	reapInterval     = 10 * time.Second
-	heartbeatTimeout = 30 * time.Second
+	reapInterval       = 10 * time.Second
+	heartbeatTimeout   = 30 * time.Second
+	workerStaleTimeout = 60 * time.Second
 )
 
 // StartReaper runs a background goroutine that detects dead workers.
@@ -43,6 +44,13 @@ func runReaperTick(ctx context.Context, s store.JobStore, logger *slog.Logger, m
 	doReap := func(ctx context.Context) {
 		reap(ctx, s, logger, m)
 		s.UnblockReady(ctx)
+
+		// Mark workers with stale heartbeats as offline.
+		if ws, ok := s.(store.WorkerStore); ok {
+			if n := ws.RemoveStaleWorkers(ctx, workerStaleTimeout); n > 0 {
+				logger.Info("marked stale workers offline", "count", n)
+			}
+		}
 	}
 
 	locker, ok := s.(store.ReaperLocker)

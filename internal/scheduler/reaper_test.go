@@ -208,3 +208,27 @@ func TestRunReaperTick_NoLocker_RunsUnconditionally(t *testing.T) {
 		t.Errorf("expected status pending, got %s", job.Status)
 	}
 }
+
+func TestReap_RemovesStaleWorkers(t *testing.T) {
+	ctx := context.Background()
+	s := store.NewMemoryStore()
+
+	// Register two workers
+	_ = s.RegisterWorker(ctx, store.Worker{ID: "w-1", ExecAddr: "host:1"})
+	_ = s.RegisterWorker(ctx, store.Worker{ID: "w-2", ExecAddr: "host:2"})
+
+	// Make w-1 stale (heartbeat 2 minutes ago)
+	s.SetWorkerHeartbeat("w-1", time.Now().Add(-2*time.Minute))
+
+	runReaperTick(ctx, s, slog.Default(), metrics.NewMetrics())
+
+	w1, _ := s.GetWorker(ctx, "w-1")
+	if w1.Status != store.WorkerOffline {
+		t.Errorf("w-1 status = %q, want %q", w1.Status, store.WorkerOffline)
+	}
+
+	w2, _ := s.GetWorker(ctx, "w-2")
+	if w2.Status != store.WorkerActive {
+		t.Errorf("w-2 status = %q, want %q", w2.Status, store.WorkerActive)
+	}
+}
