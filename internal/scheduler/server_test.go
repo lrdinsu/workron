@@ -674,3 +674,129 @@ func TestHandleHealth_ReturnsInstanceInfo(t *testing.T) {
 		t.Error("expected non-empty uptime")
 	}
 }
+
+// --- Worker endpoint tests ---
+
+func TestHandleRegisterWorker_Success(t *testing.T) {
+	srv := newTestServer()
+
+	body := bytes.NewBufferString(`{"id": "w-1", "exec_addr": "localhost:9000", "resources": {"vram_mb": 8192}}`)
+	r := httptest.NewRequest(http.MethodPost, "/workers/register", body)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status 201, got %d", w.Code)
+	}
+
+	var worker store.Worker
+	if err := json.NewDecoder(w.Body).Decode(&worker); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if worker.ID != "w-1" {
+		t.Errorf("expected worker ID w-1, got %s", worker.ID)
+	}
+	if worker.ExecAddr != "localhost:9000" {
+		t.Errorf("expected exec_addr localhost:9000, got %s", worker.ExecAddr)
+	}
+	if worker.Status != store.WorkerActive {
+		t.Errorf("expected status active, got %s", worker.Status)
+	}
+}
+
+func TestHandleRegisterWorker_MissingID(t *testing.T) {
+	srv := newTestServer()
+
+	body := bytes.NewBufferString(`{"exec_addr": "localhost:9000"}`)
+	r := httptest.NewRequest(http.MethodPost, "/workers/register", body)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400, got %d", w.Code)
+	}
+}
+
+func TestHandleWorkerHeartbeat_Success(t *testing.T) {
+	srv := newTestServer()
+
+	// Register first
+	regBody := bytes.NewBufferString(`{"id": "w-1", "exec_addr": "localhost:9000"}`)
+	regReq := httptest.NewRequest(http.MethodPost, "/workers/register", regBody)
+	regW := httptest.NewRecorder()
+	srv.ServeHTTP(regW, regReq)
+
+	// Heartbeat
+	r := httptest.NewRequest(http.MethodPost, "/workers/w-1/heartbeat", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
+	}
+}
+
+func TestHandleWorkerHeartbeat_NotFound(t *testing.T) {
+	srv := newTestServer()
+
+	r := httptest.NewRequest(http.MethodPost, "/workers/nonexistent/heartbeat", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected status 404, got %d", w.Code)
+	}
+}
+
+func TestHandleListWorkers_Empty(t *testing.T) {
+	srv := newTestServer()
+
+	r := httptest.NewRequest(http.MethodGet, "/workers", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
+	}
+
+	var workers []store.Worker
+	if err := json.NewDecoder(w.Body).Decode(&workers); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(workers) != 0 {
+		t.Errorf("expected empty list, got %d workers", len(workers))
+	}
+}
+
+func TestHandleListWorkers_WithWorkers(t *testing.T) {
+	srv := newTestServer()
+
+	// Register two workers
+	for _, id := range []string{"w-1", "w-2"} {
+		body := bytes.NewBufferString(`{"id": "` + id + `", "exec_addr": "host:9000"}`)
+		r := httptest.NewRequest(http.MethodPost, "/workers/register", body)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/workers", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
+	}
+
+	var workers []store.Worker
+	if err := json.NewDecoder(w.Body).Decode(&workers); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(workers) != 2 {
+		t.Errorf("expected 2 workers, got %d", len(workers))
+	}
+}

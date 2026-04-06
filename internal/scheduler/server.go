@@ -21,13 +21,14 @@ const loggerKey contextKey = "logger"
 
 // Server holds the HTTP mux and the job store
 type Server struct {
-	store      store.JobStore
-	mux        *http.ServeMux
-	logger     *slog.Logger
-	metrics    *metrics.Metrics
-	registry   *prometheus.Registry
-	instanceID string
-	startTime  time.Time
+	store       store.JobStore
+	workerStore store.WorkerStore // nil if the store doesn't implement WorkerStore
+	mux         *http.ServeMux
+	logger      *slog.Logger
+	metrics     *metrics.Metrics
+	registry    *prometheus.Registry
+	instanceID  string
+	startTime   time.Time
 }
 
 // NewServer creates a new Server and registers all routes.
@@ -42,6 +43,12 @@ func NewServer(s store.JobStore, logger *slog.Logger, m *metrics.Metrics, regist
 		registry:   registry,
 		instanceID: instanceID,
 		startTime:  time.Now(),
+	}
+
+	// Discover WorkerStore capability via type assertion.
+	// All three backends (Memory, SQLite, Postgres) implement it.
+	if ws, ok := s.(store.WorkerStore); ok {
+		srv.workerStore = ws
 	}
 	srv.registerRoutes()
 	return srv
@@ -85,6 +92,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /jobs/{id}/fail", s.handleJobFail)
 	s.mux.HandleFunc("POST /jobs/{id}/heartbeat", s.handleHeartbeat)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+	s.mux.HandleFunc("POST /workers/register", s.handleRegisterWorker)
+	s.mux.HandleFunc("POST /workers/{id}/heartbeat", s.handleWorkerHeartbeat)
+	s.mux.HandleFunc("GET /workers", s.handleListWorkers)
 	s.mux.Handle("GET /metrics", promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
 }
 
@@ -267,6 +277,66 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"uptime":      time.Since(s.startTime).Round(time.Second).String(),
 		"status":      "ok",
 	})
+}
+
+// --- Worker endpoints ---
+
+// handleRegisterWorker handles POST /workers/register
+// A worker calls this on startup to announce itself to the scheduler.
+func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request) {
+	if s.workerStore == nil {
+		http.Error(w, "worker registration not supported", http.StatusNotImplemented)
+		return
+	}
+
+	var worker store.Worker
+	if err := json.NewDecoder(r.Body).Decode(&worker); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if worker.ID == "" {
+		http.Error(w, "worker id is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.workerStore.RegisterWorker(r.Context(), worker); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	registered, _ := s.workerStore.GetWorker(r.Context(), worker.ID)
+	s.requestLogger(r.Context()).Info("worker registered", "worker_id", worker.ID)
+	s.writeJSON(w, http.StatusCreated, registered)
+}
+
+// handleWorkerHeartbeat handles POST /workers/{id}/heartbeat
+// A worker calls this periodically to signal it is still alive.
+func (s *Server) handleWorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if s.workerStore == nil {
+		http.Error(w, "worker registration not supported", http.StatusNotImplemented)
+		return
+	}
+
+	id := r.PathValue("id")
+	if err := s.workerStore.WorkerHeartbeat(r.Context(), id); err != nil {
+		http.Error(w, "worker not found", http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleListWorkers handles GET /workers
+// Returns all registered workers.
+func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
+	if s.workerStore == nil {
+		http.Error(w, "worker registration not supported", http.StatusNotImplemented)
+		return
+	}
+
+	workers := s.workerStore.ListWorkers(r.Context())
+	s.writeJSON(w, http.StatusOK, workers)
 }
 
 // writeJSON encodes v as JSON and writes it to w
