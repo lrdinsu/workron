@@ -42,8 +42,8 @@ If you are curious about the design decisions and trade-offs behind this project
 - **Health endpoint:** `GET /health` returns instance ID, uptime, and status for load balancer checks
 - **Job resource requirements:** Jobs declare VRAM and memory needs, with priority and queue assignment
 - **Worker registration:** Workers register with resource capacity, execution address, and tags; stale workers marked offline automatically
-- **Gang scheduling fields:** Jobs carry gang ID, size, and index for coordinated multi-worker execution (scheduling logic in a future PR)
-- **Checkpoint and output fields:** Jobs carry opaque JSON for checkpoint/resume and output tracking (used by preemption in a future PR)
+- **Gang scheduling fields:** Jobs carry gang ID, size, and index for coordinated multi-worker execution
+- **Checkpoint and output fields:** Jobs carry opaque JSON for checkpoint/resume and output tracking
 
 **Planned — Scheduling Intelligence**
 - [ ] Gang scheduling: atomic all-or-nothing reservation of N workers for distributed workloads
