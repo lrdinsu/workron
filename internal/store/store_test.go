@@ -721,17 +721,27 @@ func testListWorkers(t *testing.T, factory WorkerStoreFactory) {
 	}
 }
 
+// workerHeartbeatSetter is a test-only interface for backdating worker heartbeats.
+// All three store backends (MemoryStore, SQLiteStore, PostgresStore) implement this.
+type workerHeartbeatSetter interface {
+	SetWorkerHeartbeat(id string, t time.Time)
+}
+
 func testListActiveWorkers(t *testing.T, factory WorkerStoreFactory) {
 	t.Helper()
 	s := factory(t)
 	ctx := context.Background()
 
+	setter, ok := s.(workerHeartbeatSetter)
+	if !ok {
+		t.Skip("store does not support SetWorkerHeartbeat")
+	}
+
 	_ = s.RegisterWorker(ctx, Worker{ID: "w-1", ExecAddr: "host:1"})
 	_ = s.RegisterWorker(ctx, Worker{ID: "w-2", ExecAddr: "host:2"})
 
 	// Make w-1 stale and remove it
-	ms := s.(*MemoryStore)
-	ms.SetWorkerHeartbeat("w-1", time.Now().Add(-2*time.Minute))
+	setter.SetWorkerHeartbeat("w-1", time.Now().Add(-2*time.Minute))
 	s.RemoveStaleWorkers(ctx, 60*time.Second)
 
 	active := s.ListActiveWorkers(ctx)
@@ -748,14 +758,18 @@ func testRemoveStaleWorkers(t *testing.T, factory WorkerStoreFactory) {
 	s := factory(t)
 	ctx := context.Background()
 
+	setter, ok := s.(workerHeartbeatSetter)
+	if !ok {
+		t.Skip("store does not support SetWorkerHeartbeat")
+	}
+
 	_ = s.RegisterWorker(ctx, Worker{ID: "w-1", ExecAddr: "host:1"})
 	_ = s.RegisterWorker(ctx, Worker{ID: "w-2", ExecAddr: "host:2"})
 
 	// Make both stale
-	ms := s.(*MemoryStore)
 	staleTime := time.Now().Add(-5 * time.Minute)
-	ms.SetWorkerHeartbeat("w-1", staleTime)
-	ms.SetWorkerHeartbeat("w-2", staleTime)
+	setter.SetWorkerHeartbeat("w-1", staleTime)
+	setter.SetWorkerHeartbeat("w-2", staleTime)
 
 	count := s.RemoveStaleWorkers(ctx, 60*time.Second)
 	if count != 2 {

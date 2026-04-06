@@ -370,3 +370,155 @@ func (s *SQLiteStore) queryJobs(ctx context.Context, query string, args ...any) 
 	}
 	return jobs
 }
+
+// --- WorkerStore implementation ---
+
+func (s *SQLiteStore) RegisterWorker(ctx context.Context, w Worker) error {
+	now := time.Now()
+
+	resourcesJSON, err := json.Marshal(w.Resources)
+	if err != nil {
+		return fmt.Errorf("sqlite: marshal resources: %w", err)
+	}
+	tagsJSON, err := json.Marshal(w.Tags)
+	if err != nil {
+		return fmt.Errorf("sqlite: marshal tags: %w", err)
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO workers (id, exec_addr, resources, tags, status, last_heartbeat, registered_at)
+		VALUES (?, ?, ?, ?, 'active', ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			exec_addr      = excluded.exec_addr,
+			resources      = excluded.resources,
+			tags           = excluded.tags,
+			status         = 'active',
+			last_heartbeat = excluded.last_heartbeat`,
+		w.ID, w.ExecAddr, string(resourcesJSON), string(tagsJSON), now, now,
+	)
+	if err != nil {
+		return fmt.Errorf("sqlite: register worker: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) WorkerHeartbeat(ctx context.Context, workerID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE workers SET last_heartbeat = ?, status = 'active' WHERE id = ?`,
+		time.Now(), workerID,
+	)
+	if err != nil {
+		return fmt.Errorf("sqlite: worker heartbeat: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("worker %q not found", workerID)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetWorker(ctx context.Context, workerID string) (*Worker, bool) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, exec_addr, resources, tags, status, last_heartbeat, registered_at
+		 FROM workers WHERE id = ?`, workerID,
+	)
+	return scanWorker(row)
+}
+
+func (s *SQLiteStore) ListWorkers(ctx context.Context) []*Worker {
+	return s.queryWorkers(ctx,
+		`SELECT id, exec_addr, resources, tags, status, last_heartbeat, registered_at FROM workers`)
+}
+
+func (s *SQLiteStore) ListActiveWorkers(ctx context.Context) []*Worker {
+	return s.queryWorkers(ctx,
+		`SELECT id, exec_addr, resources, tags, status, last_heartbeat, registered_at
+		 FROM workers WHERE status = 'active'`)
+}
+
+func (s *SQLiteStore) RemoveStaleWorkers(ctx context.Context, timeout time.Duration) int {
+	cutoff := time.Now().Add(-timeout)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE workers SET status = 'offline'
+		 WHERE status = 'active' AND last_heartbeat < ?`, cutoff,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: remove stale workers: %v", err))
+	}
+	n, _ := res.RowsAffected()
+	return int(n)
+}
+
+// --- Worker scan helpers ---
+
+func scanWorker(row *sql.Row) (*Worker, bool) {
+	var w Worker
+	var status string
+	var resourcesJSON, tagsJSON string
+
+	err := row.Scan(
+		&w.ID, &w.ExecAddr, &resourcesJSON, &tagsJSON,
+		&status, &w.LastHeartbeat, &w.RegisteredAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false
+	}
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: scan worker: %v", err))
+	}
+
+	w.Status = WorkerStatus(status)
+	if err := json.Unmarshal([]byte(resourcesJSON), &w.Resources); err != nil {
+		panic(fmt.Sprintf("sqlite: unmarshal worker resources: %v", err))
+	}
+	if err := json.Unmarshal([]byte(tagsJSON), &w.Tags); err != nil {
+		panic(fmt.Sprintf("sqlite: unmarshal worker tags: %v", err))
+	}
+
+	return &w, true
+}
+
+func (s *SQLiteStore) queryWorkers(ctx context.Context, query string, args ...any) []*Worker {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: query workers: %v", err))
+	}
+	defer func() { _ = rows.Close() }()
+
+	var workers []*Worker
+	for rows.Next() {
+		var w Worker
+		var status string
+		var resourcesJSON, tagsJSON string
+
+		if err := rows.Scan(
+			&w.ID, &w.ExecAddr, &resourcesJSON, &tagsJSON,
+			&status, &w.LastHeartbeat, &w.RegisteredAt,
+		); err != nil {
+			panic(fmt.Sprintf("sqlite: scan worker row: %v", err))
+		}
+
+		w.Status = WorkerStatus(status)
+		if err := json.Unmarshal([]byte(resourcesJSON), &w.Resources); err != nil {
+			panic(fmt.Sprintf("sqlite: unmarshal worker resources: %v", err))
+		}
+		if err := json.Unmarshal([]byte(tagsJSON), &w.Tags); err != nil {
+			panic(fmt.Sprintf("sqlite: unmarshal worker tags: %v", err))
+		}
+
+		workers = append(workers, &w)
+	}
+
+	if len(workers) == 0 {
+		return []*Worker{}
+	}
+	return workers
+}
+
+// SetWorkerHeartbeat sets a worker's heartbeat to a specific time. Used for testing.
+func (s *SQLiteStore) SetWorkerHeartbeat(id string, t time.Time) {
+	_, err := s.db.Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`, t, id)
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: set worker heartbeat: %v", err))
+	}
+}

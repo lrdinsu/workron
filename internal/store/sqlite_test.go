@@ -184,3 +184,43 @@ func TestSQLite_PersistenceDependsOnSurvivesReopen(t *testing.T) {
 		t.Errorf("DependsOn = %v, want [%s]", job.DependsOn, depID)
 	}
 }
+
+// --- WorkerStore compliance tests ---
+
+func newTestSQLiteWorkerStore(t *testing.T) WorkerStore {
+	t.Helper()
+	s, err := NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func TestSQLite_RegisterWorker(t *testing.T) {
+	testRegisterWorker(t, newTestSQLiteWorkerStore)
+}
+
+func TestSQLite_RegisterWorkerUpsert(t *testing.T) {
+	testRegisterWorkerUpsert(t, newTestSQLiteWorkerStore)
+}
+
+func TestSQLite_WorkerHeartbeat(t *testing.T) {
+	testWorkerHeartbeat(t, newTestSQLiteWorkerStore)
+}
+
+func TestSQLite_WorkerHeartbeatNotFound(t *testing.T) {
+	testWorkerHeartbeatNotFound(t, newTestSQLiteWorkerStore)
+}
+
+func TestSQLite_ListWorkers(t *testing.T) {
+	testListWorkers(t, newTestSQLiteWorkerStore)
+}
+
+func TestSQLite_ListActiveWorkers(t *testing.T) {
+	testListActiveWorkers(t, newTestSQLiteWorkerStore)
+}
+
+func TestSQLite_RemoveStaleWorkers(t *testing.T) {
+	testRemoveStaleWorkers(t, newTestSQLiteWorkerStore)
+}
