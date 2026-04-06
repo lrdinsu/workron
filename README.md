@@ -27,23 +27,23 @@ If you are curious about the design decisions and trade-offs behind this project
 
 ## Features
 
-- Submit and monitor jobs via REST API
-- DAG-based job dependencies: jobs declare upstream dependencies, validated at submission time with cycle detection; downstream jobs execute only after all dependencies are complete
-- Pluggable storage: in-memory for development, SQLite for single-node persistence, PostgreSQL for concurrent multi-connection access
-- Multiple concurrent workers with atomic job claiming (mutex in memory, `UPDATE ... RETURNING` in SQLite, `FOR UPDATE SKIP LOCKED` in PostgreSQL)
-- Automatic retry on failure, re-queued up to `MaxRetries` times before marked permanently failed
-- Two deployment modes: standalone (single process) or distributed (separate scheduler + worker binaries over HTTP)
-- Heartbeat-based failure detection: workers send heartbeats every 5 seconds, scheduler re-queues jobs with stale or missing heartbeats after 30 seconds
-- Graceful shutdown: workers finish their current job before exiting
-- Structured JSON logging with `log/slog`: typed key-value fields, log levels, logger injection with `With` for component identity
-- Prometheus metrics: counters for job lifecycle events, histograms for execution duration and queue wait, gauges for current queue state via custom collector
-- Request ID tracing: UUID per HTTP request, `X-Request-ID` response header, request-scoped logger via context
-- Multi-scheduler coordination: multiple scheduler instances can share one PostgreSQL database safely. Job claiming uses `FOR UPDATE SKIP LOCKED`, reaper uses a transaction-scoped advisory lock (`pg_try_advisory_xact_lock`) so only one instance runs heartbeat timeout detection at a time. If the leader crashes, the lock auto-releases and another instance picks up.
-- Health endpoint: `GET /health` returns instance ID, uptime, and status for load balancer checks and debugging multi-scheduler deployments
-- Job resource requirements: jobs declare VRAM and memory needs, with priority and queue assignment
-- Worker registration: workers register via HTTP with resource capacity (VRAM, memory), execution address, and tags. The scheduler tracks worker liveness and marks stale workers as offline.
-- Gang scheduling fields: jobs carry gang ID, size, and index for coordinated multi-worker execution
-- Checkpoint and output fields: jobs carry opaque JSON for checkpoint/resume and output tracking
+- **REST API:** Submit, monitor, and manage jobs over HTTP
+- **DAG pipelines:** Jobs declare upstream dependencies, validated at submission with cycle detection; downstream jobs run only after all dependencies complete
+- **Pluggable storage:** In-memory for development, SQLite for single-node persistence, PostgreSQL for concurrent multi-connection access
+- **Atomic job claiming:** Mutex in memory, `UPDATE ... RETURNING` in SQLite, `FOR UPDATE SKIP LOCKED` in PostgreSQL
+- **Automatic retry:** Failed jobs re-queued up to `MaxRetries` times before marked permanently failed
+- **Two deployment modes:** Standalone (single process) or distributed (separate scheduler + worker binaries over HTTP)
+- **Heartbeat-based failure detection:** Workers send 5s heartbeats; the scheduler re-queues orphaned jobs after 30s of silence
+- **Graceful shutdown:** Workers finish their current job before exiting
+- **Structured logging:** JSON output via `log/slog` with typed fields, log levels, and per-component logger injection
+- **Prometheus metrics:** Counters for job lifecycle events, histograms for execution duration and queue wait, gauges for queue state via custom collector
+- **Request ID tracing:** UUID per HTTP request, `X-Request-ID` header, request-scoped logger via context
+- **Multi-scheduler coordination:** Multiple instances share one PostgreSQL database; advisory locks ensure only one reaper runs at a time
+- **Health endpoint:** `GET /health` returns instance ID, uptime, and status for load balancer checks
+- **Job resource requirements:** Jobs declare VRAM and memory needs, with priority and queue assignment
+- **Worker registration:** Workers register with resource capacity, execution address, and tags; stale workers marked offline automatically
+- **Gang scheduling fields:** Jobs carry gang ID, size, and index for coordinated multi-worker execution (scheduling logic in a future PR)
+- **Checkpoint and output fields:** Jobs carry opaque JSON for checkpoint/resume and output tracking (used by preemption in a future PR)
 
 **Planned — Scheduling Intelligence**
 - [ ] Gang scheduling: atomic all-or-nothing reservation of N workers for distributed workloads
@@ -217,7 +217,25 @@ make stop-postgres
 
 ## API
 
-### Submit a job
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/jobs` | Submit a job (with optional dependencies, resources, priority) |
+| `GET` | `/jobs` | List all jobs |
+| `GET` | `/jobs/{id}` | Get job status |
+| `GET` | `/jobs/next` | Claim next pending job (used by workers) |
+| `POST` | `/jobs/{id}/done` | Report job completed |
+| `POST` | `/jobs/{id}/fail` | Report job failed (scheduler decides retry vs permanent failure) |
+| `POST` | `/jobs/{id}/heartbeat` | Worker heartbeat for running job |
+| `POST` | `/workers/register` | Register a worker with resource capacity |
+| `POST` | `/workers/{id}/heartbeat` | Worker liveness heartbeat |
+| `GET` | `/workers` | List all registered workers |
+| `GET` | `/health` | Health check (instance ID, uptime, status) |
+| `GET` | `/metrics` | Prometheus metrics |
+
+<details>
+<summary><strong>Job endpoints</strong></summary>
+
+#### Submit a job
 
 ```bash
 curl -X POST http://localhost:8080/jobs \
@@ -237,7 +255,7 @@ Response (`201 Created`):
 }
 ```
 
-### Submit a job with dependencies
+#### Submit a job with dependencies
 
 ```bash
 curl -X POST http://localhost:8080/jobs \
@@ -260,7 +278,7 @@ Response (`201 Created`):
 
 The job starts as `blocked` and transitions to `pending` automatically once all dependencies reach `done`. Returns `400` if any dependency ID does not exist or if the dependency graph would contain a cycle.
 
-### Submit a job with resource requirements
+#### Submit a job with resource requirements
 
 ```bash
 curl -X POST http://localhost:8080/jobs \
@@ -270,7 +288,7 @@ curl -X POST http://localhost:8080/jobs \
 
 Jobs can declare VRAM and memory requirements, a priority level (higher is more important), and a queue name. These fields are stored and returned on the job, ready for resource-aware scheduling in a future PR.
 
-### Submit a pipeline
+#### Submit a pipeline
 
 ```bash
 JOB1=$(curl -s -X POST http://localhost:8080/jobs \
@@ -285,66 +303,23 @@ JOB3=$(curl -s -X POST http://localhost:8080/jobs \
 # step1 runs immediately, step2 waits for step1, step3 waits for step2
 ```
 
-### Get job status
+#### Other job endpoints
 
 ```bash
-curl http://localhost:8080/jobs/{id}
+curl http://localhost:8080/jobs/{id}          # Get job status
+curl http://localhost:8080/jobs               # List all jobs
+curl http://localhost:8080/jobs/next          # Claim next job (200 or 204 No Content)
+curl -X POST http://localhost:8080/jobs/{id}/done       # Report done
+curl -X POST http://localhost:8080/jobs/{id}/fail       # Report failed
+curl -X POST http://localhost:8080/jobs/{id}/heartbeat  # Send heartbeat
 ```
 
-### List all jobs
+</details>
 
-```bash
-curl http://localhost:8080/jobs
-```
+<details>
+<summary><strong>Worker endpoints</strong></summary>
 
-### Claim next job (used by workers)
-
-```bash
-curl http://localhost:8080/jobs/next
-```
-
-Returns `200` with the claimed job, or `204 No Content` if no jobs are available.
-
-### Report job done
-
-```bash
-curl -X POST http://localhost:8080/jobs/{id}/done
-```
-
-### Report job failed
-
-```bash
-curl -X POST http://localhost:8080/jobs/{id}/fail
-```
-
-The scheduler decides whether to retry (re-queue as `pending`) or mark as permanently `failed` based on the attempt count.
-
-### Send heartbeat
-
-```bash
-curl -X POST http://localhost:8080/jobs/{id}/heartbeat
-```
-
-Workers call this automatically every 5 seconds while processing a job. Returns `200` on success, `404` if job not found, `409` if job is not running.
-
-### Health check
-
-```bash
-curl http://localhost:8080/health
-```
-
-Response (`200 OK`):
-```json
-{
-  "instance_id": "a1b2c3d4",
-  "uptime": "2h15m30s",
-  "status": "ok"
-}
-```
-
-Each scheduler instance generates a unique short ID at startup. Useful for load balancer health checks and identifying which instance you're talking to in multi-scheduler deployments.
-
-### Register a worker
+#### Register a worker
 
 ```bash
 curl -X POST http://localhost:8080/workers/register \
@@ -365,7 +340,7 @@ Response (`201 Created`):
 }
 ```
 
-### Worker heartbeat
+#### Worker heartbeat
 
 ```bash
 curl -X POST http://localhost:8080/workers/worker-1/heartbeat
@@ -373,7 +348,7 @@ curl -X POST http://localhost:8080/workers/worker-1/heartbeat
 
 Returns `200` on success, `404` if worker not found.
 
-### List workers
+#### List workers
 
 ```bash
 curl http://localhost:8080/workers
@@ -381,13 +356,37 @@ curl http://localhost:8080/workers
 
 Returns all registered workers with their current status and resource capacity.
 
-### Prometheus metrics
+</details>
+
+<details>
+<summary><strong>Health and metrics</strong></summary>
+
+#### Health check
+
+```bash
+curl http://localhost:8080/health
+```
+
+Response (`200 OK`):
+```json
+{
+  "instance_id": "a1b2c3d4",
+  "uptime": "2h15m30s",
+  "status": "ok"
+}
+```
+
+Each scheduler instance generates a unique short ID at startup. Useful for load balancer health checks and identifying which instance you're talking to in multi-scheduler deployments.
+
+#### Prometheus metrics
 
 ```bash
 curl http://localhost:8080/metrics
 ```
 
 Returns Prometheus-compatible metrics including `workron_jobs_submitted_total`, `workron_jobs_completed_total`, `workron_job_execution_duration_seconds`, `workron_jobs_pending`, `workron_reaper_leader`, and more.
+
+</details>
 
 ---
 
