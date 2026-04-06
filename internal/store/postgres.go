@@ -335,3 +335,158 @@ func (s *PostgresStore) pgQueryJobs(ctx context.Context, query string, args ...a
 	}
 	return jobs
 }
+
+// --- WorkerStore implementation ---
+
+func (s *PostgresStore) RegisterWorker(ctx context.Context, w Worker) error {
+	now := time.Now()
+
+	resourcesJSON, err := json.Marshal(w.Resources)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal resources: %w", err)
+	}
+
+	if w.Tags == nil {
+		w.Tags = []string{}
+	}
+	tagsJSON, err := json.Marshal(w.Tags)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal tags: %w", err)
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO workers (id, exec_addr, resources, tags, status, last_heartbeat, registered_at)
+		VALUES ($1, $2, $3::jsonb, $4::jsonb, 'active', $5, $6)
+		ON CONFLICT (id) DO UPDATE SET
+			exec_addr      = EXCLUDED.exec_addr,
+			resources      = EXCLUDED.resources,
+			tags           = EXCLUDED.tags,
+			status         = 'active',
+			last_heartbeat = EXCLUDED.last_heartbeat`,
+		w.ID, w.ExecAddr, string(resourcesJSON), string(tagsJSON), now, now,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: register worker: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) WorkerHeartbeat(ctx context.Context, workerID string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE workers SET last_heartbeat = $1, status = 'active' WHERE id = $2`,
+		time.Now(), workerID,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: worker heartbeat: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("worker %q not found", workerID)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetWorker(ctx context.Context, workerID string) (*Worker, bool) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, exec_addr, resources, tags, status, last_heartbeat, registered_at
+		 FROM workers WHERE id = $1`, workerID,
+	)
+	return pgScanWorker(row)
+}
+
+func (s *PostgresStore) ListWorkers(ctx context.Context) []*Worker {
+	return s.pgQueryWorkers(ctx,
+		`SELECT id, exec_addr, resources, tags, status, last_heartbeat, registered_at FROM workers`)
+}
+
+func (s *PostgresStore) ListActiveWorkers(ctx context.Context) []*Worker {
+	return s.pgQueryWorkers(ctx,
+		`SELECT id, exec_addr, resources, tags, status, last_heartbeat, registered_at
+		 FROM workers WHERE status = 'active'`)
+}
+
+func (s *PostgresStore) RemoveStaleWorkers(ctx context.Context, timeout time.Duration) int {
+	cutoff := time.Now().Add(-timeout)
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE workers SET status = 'offline'
+		 WHERE status = 'active' AND last_heartbeat < $1`, cutoff,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("postgres: remove stale workers: %v", err))
+	}
+	return int(tag.RowsAffected())
+}
+
+// SetWorkerHeartbeat sets a worker's heartbeat to a specific time. Used for testing.
+func (s *PostgresStore) SetWorkerHeartbeat(id string, t time.Time) {
+	_, err := s.pool.Exec(context.Background(),
+		`UPDATE workers SET last_heartbeat = $1 WHERE id = $2`, t, id)
+	if err != nil {
+		panic(fmt.Sprintf("postgres: set worker heartbeat: %v", err))
+	}
+}
+
+// --- Worker scan helpers ---
+
+func pgScanWorker(row pgx.Row) (*Worker, bool) {
+	var w Worker
+	var status string
+	var resourcesJSON, tagsJSON []byte
+
+	err := row.Scan(
+		&w.ID, &w.ExecAddr, &resourcesJSON, &tagsJSON,
+		&status, &w.LastHeartbeat, &w.RegisteredAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, false
+	}
+	if err != nil {
+		panic(fmt.Sprintf("postgres: scan worker: %v", err))
+	}
+
+	w.Status = WorkerStatus(status)
+	if err := json.Unmarshal(resourcesJSON, &w.Resources); err != nil {
+		panic(fmt.Sprintf("postgres: unmarshal worker resources: %v", err))
+	}
+	if err := json.Unmarshal(tagsJSON, &w.Tags); err != nil {
+		panic(fmt.Sprintf("postgres: unmarshal worker tags: %v", err))
+	}
+
+	return &w, true
+}
+
+func (s *PostgresStore) pgQueryWorkers(ctx context.Context, query string, args ...any) []*Worker {
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		panic(fmt.Sprintf("postgres: query workers: %v", err))
+	}
+	defer rows.Close()
+
+	var workers []*Worker
+	for rows.Next() {
+		var w Worker
+		var status string
+		var resourcesJSON, tagsJSON []byte
+
+		if err := rows.Scan(
+			&w.ID, &w.ExecAddr, &resourcesJSON, &tagsJSON,
+			&status, &w.LastHeartbeat, &w.RegisteredAt,
+		); err != nil {
+			panic(fmt.Sprintf("postgres: scan worker row: %v", err))
+		}
+
+		w.Status = WorkerStatus(status)
+		if err := json.Unmarshal(resourcesJSON, &w.Resources); err != nil {
+			panic(fmt.Sprintf("postgres: unmarshal worker resources: %v", err))
+		}
+		if err := json.Unmarshal(tagsJSON, &w.Tags); err != nil {
+			panic(fmt.Sprintf("postgres: unmarshal worker tags: %v", err))
+		}
+
+		workers = append(workers, &w)
+	}
+
+	if len(workers) == 0 {
+		return []*Worker{}
+	}
+	return workers
+}

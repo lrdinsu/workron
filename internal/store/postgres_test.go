@@ -21,8 +21,12 @@ func newTestPostgresStore(t *testing.T) JobStore {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Clean the jobs table before each test for isolation.
+	// Clean tables before each test for isolation.
 	_, err = s.pool.Exec(ctx, "DELETE FROM jobs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.pool.Exec(ctx, "DELETE FROM workers")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,4 +289,40 @@ func TestPostgres_WithReaperLock_ConcurrentInstances(t *testing.T) {
 	if acquiredCount != 1 {
 		t.Errorf("expected exactly 1 lock acquisition, got %d", acquiredCount)
 	}
+}
+
+// --- WorkerStore compliance tests ---
+
+func newTestPostgresWorkerStore(t *testing.T) WorkerStore {
+	t.Helper()
+	// Reuse the JobStore factory which already cleans both tables.
+	return newTestPostgresStore(t).(*PostgresStore)
+}
+
+func TestPostgres_RegisterWorker(t *testing.T) {
+	testRegisterWorker(t, newTestPostgresWorkerStore)
+}
+
+func TestPostgres_RegisterWorkerUpsert(t *testing.T) {
+	testRegisterWorkerUpsert(t, newTestPostgresWorkerStore)
+}
+
+func TestPostgres_WorkerHeartbeat(t *testing.T) {
+	testWorkerHeartbeat(t, newTestPostgresWorkerStore)
+}
+
+func TestPostgres_WorkerHeartbeatNotFound(t *testing.T) {
+	testWorkerHeartbeatNotFound(t, newTestPostgresWorkerStore)
+}
+
+func TestPostgres_ListWorkers(t *testing.T) {
+	testListWorkers(t, newTestPostgresWorkerStore)
+}
+
+func TestPostgres_ListActiveWorkers(t *testing.T) {
+	testListActiveWorkers(t, newTestPostgresWorkerStore)
+}
+
+func TestPostgres_RemoveStaleWorkers(t *testing.T) {
+	testRemoveStaleWorkers(t, newTestPostgresWorkerStore)
 }

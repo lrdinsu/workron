@@ -722,7 +722,7 @@ func testListWorkers(t *testing.T, factory WorkerStoreFactory) {
 }
 
 // workerHeartbeatSetter is a test-only interface for backdating worker heartbeats.
-// MemoryStore and SQLiteStore both implement this via SetWorkerHeartbeat.
+// All three store backends (MemoryStore, SQLiteStore, PostgresStore) implement this.
 type workerHeartbeatSetter interface {
 	SetWorkerHeartbeat(id string, t time.Time)
 }
