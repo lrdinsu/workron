@@ -151,6 +151,28 @@ func TestMemory_RemoveStaleWorkers(t *testing.T) {
 	testRemoveStaleWorkers(t, newTestMemoryWorkerStore)
 }
 
+// --- New Job fields compliance tests ---
+
+func TestMemory_AddJobWithResources(t *testing.T) {
+	testAddJobWithResources(t, newTestMemoryStore)
+}
+
+func TestMemory_AddJobWithPriority(t *testing.T) {
+	testAddJobWithPriority(t, newTestMemoryStore)
+}
+
+func TestMemory_AddJobWithQueueName(t *testing.T) {
+	testAddJobWithQueueName(t, newTestMemoryStore)
+}
+
+func TestMemory_AddJobWithGangFields(t *testing.T) {
+	testAddJobWithGangFields(t, newTestMemoryStore)
+}
+
+func TestMemory_AddJobDefaultFields(t *testing.T) {
+	testAddJobDefaultFields(t, newTestMemoryStore)
+}
+
 func TestMemoryStore_AddAndClaimJob(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()
