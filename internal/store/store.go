@@ -76,27 +76,29 @@ type Worker struct {
 
 // Job represents a single command to be executed
 type Job struct {
-	ID               string          `json:"id"`
-	Command          string          `json:"command"`
-	Status           JobStatus       `json:"status"`
-	CreatedAt        time.Time       `json:"created_at"`
-	StartedAt        *time.Time      `json:"started_at,omitempty"`
-	DoneAt           *time.Time      `json:"done_at,omitempty"`
-	LastHeartbeat    *time.Time      `json:"last_heart_beat,omitempty"`
-	MaxRetries       int             `json:"max_retries"`
-	Attempts         int             `json:"attempts"`
-	DependsOn        []string        `json:"depends_on,omitempty"`
-	Resources        *ResourceSpec   `json:"resources,omitempty"`
-	WorkerID         string          `json:"worker_id,omitempty"`
-	Priority         int             `json:"priority,omitempty"`
-	QueueName        string          `json:"queue_name,omitempty"`
-	GangID           string          `json:"gang_id,omitempty"`
-	GangSize         int             `json:"gang_size,omitempty"`
-	GangIndex        int             `json:"gang_index,omitempty"`
-	Checkpoint       json.RawMessage `json:"checkpoint,omitempty"`
-	Outputs          json.RawMessage `json:"outputs,omitempty"`
-	ReservationEpoch int             `json:"reservation_epoch,omitempty"`
-	PreemptionEpoch  int             `json:"preemption_epoch,omitempty"`
+	ID               string            `json:"id"`
+	Command          string            `json:"command"`
+	Status           JobStatus         `json:"status"`
+	CreatedAt        time.Time         `json:"created_at"`
+	StartedAt        *time.Time        `json:"started_at,omitempty"`
+	DoneAt           *time.Time        `json:"done_at,omitempty"`
+	LastHeartbeat    *time.Time        `json:"last_heart_beat,omitempty"`
+	MaxRetries       int               `json:"max_retries"`
+	Attempts         int               `json:"attempts"`
+	DependsOn        []string          `json:"depends_on,omitempty"`
+	Resources        *ResourceSpec     `json:"resources,omitempty"`
+	WorkerID         string            `json:"worker_id,omitempty"`
+	Priority         int               `json:"priority,omitempty"`
+	QueueName        string            `json:"queue_name,omitempty"`
+	GangID           string            `json:"gang_id,omitempty"`
+	GangSize         int               `json:"gang_size,omitempty"`
+	GangIndex        int               `json:"gang_index,omitempty"`
+	Checkpoint       json.RawMessage   `json:"checkpoint,omitempty"`
+	Outputs          json.RawMessage   `json:"outputs,omitempty"`
+	ReservationEpoch int               `json:"reservation_epoch,omitempty"`
+	ReservedAt       *time.Time        `json:"reserved_at,omitempty"`
+	PreemptionEpoch  int               `json:"preemption_epoch,omitempty"`
+	Env              map[string]string `json:"env,omitempty"` // not persisted; populated in HTTP responses
 }
 
 // ReaperLocker is an optional interface that storage backends can implement
@@ -124,7 +126,41 @@ type WorkerStore interface {
 	RemoveStaleWorkers(ctx context.Context, timeout time.Duration) int
 }
 
+// GangStore defines operations for gang scheduling.
+// Like WorkerStore, this is an optional interface discovered via type assertion.
+type GangStore interface {
+	// AddGang creates N tasks (N = params.GangSize) sharing the same gang_id.
+	// All tasks start as blocked and have gang_index 0..N-1.
+	AddGang(ctx context.Context, params AddJobParams) (gangID string, taskIDs []string)
+
+	// ListGangTasks returns all tasks for a gang, sorted by gang_index.
+	ListGangTasks(ctx context.Context, gangID string) []*Job
+
+	// ReserveGang atomically transitions all blocked gang tasks to reserved,
+	// sets each task's worker_id from assignments (taskID -> workerID),
+	// increments reservation_epoch, and sets reserved_at to now.
+	ReserveGang(ctx context.Context, gangID string, assignments map[string]string, epoch int) error
+
+	// ClaimReservedJob finds one reserved job assigned to workerID and
+	// transitions it to running. Returns (nil, false) if none found.
+	ClaimReservedJob(ctx context.Context, workerID string) (*Job, bool)
+
+	// RollbackGang moves all reserved tasks in a gang back to blocked,
+	// clearing worker_id and reserved_at.
+	RollbackGang(ctx context.Context, gangID string) error
+
+	// FailGang handles gang failure. Only changes blocked/reserved/pending
+	// siblings: to blocked (retry=true) or failed (retry=false).
+	// Running and done siblings are left untouched.
+	FailGang(ctx context.Context, gangID string, retry bool) error
+}
+
 // generateID returns a unique job ID using a UUID v4.
 func generateID() string {
 	return fmt.Sprintf("job-%s", uuid.New().String())
+}
+
+// generateGangID returns a unique gang ID using a UUID v4.
+func generateGangID() string {
+	return fmt.Sprintf("gang-%s", uuid.New().String())
 }
