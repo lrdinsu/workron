@@ -898,3 +898,338 @@ func testAddJobDefaultFields(t *testing.T, factory StoreFactory) {
 		t.Errorf("GangIndex = %d, want 0", job.GangIndex)
 	}
 }
+
+// --- Compliance tests: GangStore ---
+
+// gangJobStore combines GangStore and JobStore — all our backends implement both.
+type gangJobStore interface {
+	GangStore
+	JobStore
+}
+
+// GangJobStoreFactory creates a fresh store that implements both interfaces.
+type GangJobStoreFactory func(t *testing.T) gangJobStore
+
+func testAddGang(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{
+		Command:   "torchrun train.py",
+		GangSize:  3,
+		Priority:  5,
+		Resources: &ResourceSpec{VRAMMB: 8192},
+	})
+
+	if gangID == "" {
+		t.Fatal("AddGang returned empty gangID")
+	}
+	if len(taskIDs) != 3 {
+		t.Fatalf("expected 3 task IDs, got %d", len(taskIDs))
+	}
+
+	for i, id := range taskIDs {
+		job, found := s.GetJob(ctx, id)
+		if !found {
+			t.Fatalf("task %d not found", i)
+		}
+		if job.Status != StatusBlocked {
+			t.Errorf("task %d status = %q, want blocked", i, job.Status)
+		}
+		if job.GangID != gangID {
+			t.Errorf("task %d gang_id = %q, want %q", i, job.GangID, gangID)
+		}
+		if job.GangSize != 3 {
+			t.Errorf("task %d gang_size = %d, want 3", i, job.GangSize)
+		}
+		if job.GangIndex != i {
+			t.Errorf("task %d gang_index = %d, want %d", i, job.GangIndex, i)
+		}
+		if job.Command != "torchrun train.py" {
+			t.Errorf("task %d command = %q, want torchrun train.py", i, job.Command)
+		}
+		if job.Priority != 5 {
+			t.Errorf("task %d priority = %d, want 5", i, job.Priority)
+		}
+		if job.Resources == nil || job.Resources.VRAMMB != 8192 {
+			t.Errorf("task %d resources mismatch", i)
+		}
+	}
+}
+
+func testListGangTasks(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	gangID, _ := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 4})
+
+	tasks := s.ListGangTasks(ctx, gangID)
+	if len(tasks) != 4 {
+		t.Fatalf("expected 4 tasks, got %d", len(tasks))
+	}
+	for i, task := range tasks {
+		if task.GangIndex != i {
+			t.Errorf("task[%d].GangIndex = %d, want %d (not sorted?)", i, task.GangIndex, i)
+		}
+	}
+}
+
+func testListGangTasksEmpty(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	tasks := s.ListGangTasks(ctx, "nonexistent-gang")
+	if len(tasks) != 0 {
+		t.Errorf("expected 0 tasks for nonexistent gang, got %d", len(tasks))
+	}
+}
+
+func testReserveGang(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 3})
+
+	assignments := map[string]string{
+		taskIDs[0]: "worker-a",
+		taskIDs[1]: "worker-b",
+		taskIDs[2]: "worker-c",
+	}
+
+	err := s.ReserveGang(ctx, gangID, assignments, 1)
+	if err != nil {
+		t.Fatalf("ReserveGang: %v", err)
+	}
+
+	for i, id := range taskIDs {
+		job, _ := s.GetJob(ctx, id)
+		if job.Status != StatusReserved {
+			t.Errorf("task %d status = %q, want reserved", i, job.Status)
+		}
+		if job.WorkerID != assignments[id] {
+			t.Errorf("task %d worker_id = %q, want %q", i, job.WorkerID, assignments[id])
+		}
+		if job.ReservationEpoch != 1 {
+			t.Errorf("task %d reservation_epoch = %d, want 1", i, job.ReservationEpoch)
+		}
+		if job.ReservedAt == nil {
+			t.Errorf("task %d reserved_at is nil, want non-nil", i)
+		}
+	}
+}
+
+func testReserveGangNotBlocked(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 2})
+
+	assignments := map[string]string{
+		taskIDs[0]: "worker-a",
+		taskIDs[1]: "worker-b",
+	}
+	_ = s.ReserveGang(ctx, gangID, assignments, 1)
+
+	// Try to reserve again, tasks are now reserved, not blocked
+	err := s.ReserveGang(ctx, gangID, assignments, 2)
+	if err == nil {
+		t.Fatal("expected error when reserving non-blocked tasks")
+	}
+}
+
+func testClaimReservedJob(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 2})
+
+	assignments := map[string]string{
+		taskIDs[0]: "worker-a",
+		taskIDs[1]: "worker-b",
+	}
+	_ = s.ReserveGang(ctx, gangID, assignments, 1)
+
+	job, found := s.ClaimReservedJob(ctx, "worker-a")
+	if !found {
+		t.Fatal("expected to claim reserved job for worker-a")
+	}
+	if job.Status != StatusRunning {
+		t.Errorf("status = %q, want running", job.Status)
+	}
+	if job.WorkerID != "worker-a" {
+		t.Errorf("worker_id = %q, want worker-a", job.WorkerID)
+	}
+	if job.Attempts != 1 {
+		t.Errorf("attempts = %d, want 1", job.Attempts)
+	}
+	if job.StartedAt == nil {
+		t.Error("started_at is nil, want non-nil")
+	}
+
+	// Claiming again for same worker should return nothing
+	_, found2 := s.ClaimReservedJob(ctx, "worker-a")
+	if found2 {
+		t.Error("expected no second claim for worker-a")
+	}
+}
+
+func testClaimReservedJobWrongWorker(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 2})
+
+	assignments := map[string]string{
+		taskIDs[0]: "worker-a",
+		taskIDs[1]: "worker-b",
+	}
+	_ = s.ReserveGang(ctx, gangID, assignments, 1)
+
+	_, found := s.ClaimReservedJob(ctx, "worker-x")
+	if found {
+		t.Fatal("expected no job for unassigned worker")
+	}
+}
+
+func testRollbackGang(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 3})
+
+	assignments := map[string]string{
+		taskIDs[0]: "worker-a",
+		taskIDs[1]: "worker-b",
+		taskIDs[2]: "worker-c",
+	}
+	_ = s.ReserveGang(ctx, gangID, assignments, 1)
+
+	err := s.RollbackGang(ctx, gangID)
+	if err != nil {
+		t.Fatalf("RollbackGang: %v", err)
+	}
+
+	for i, id := range taskIDs {
+		job, _ := s.GetJob(ctx, id)
+		if job.Status != StatusBlocked {
+			t.Errorf("task %d status = %q, want blocked after rollback", i, job.Status)
+		}
+		if job.WorkerID != "" {
+			t.Errorf("task %d worker_id = %q, want empty after rollback", i, job.WorkerID)
+		}
+		if job.ReservedAt != nil {
+			t.Errorf("task %d reserved_at should be nil after rollback", i)
+		}
+	}
+}
+
+func testRollbackGangSkipsRunning(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 3})
+
+	assignments := map[string]string{
+		taskIDs[0]: "worker-a",
+		taskIDs[1]: "worker-b",
+		taskIDs[2]: "worker-c",
+	}
+	_ = s.ReserveGang(ctx, gangID, assignments, 1)
+
+	// Claim task 0 (now running)
+	_, _ = s.ClaimReservedJob(ctx, "worker-a")
+
+	_ = s.RollbackGang(ctx, gangID)
+
+	job0, _ := s.GetJob(ctx, taskIDs[0])
+	if job0.Status != StatusRunning {
+		t.Errorf("running task should be untouched after rollback, got %q", job0.Status)
+	}
+
+	job1, _ := s.GetJob(ctx, taskIDs[1])
+	if job1.Status != StatusBlocked {
+		t.Errorf("reserved task should be blocked after rollback, got %q", job1.Status)
+	}
+}
+
+func testFailGangRetry(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 3})
+
+	// Reserve and claim task 0
+	assignments := map[string]string{
+		taskIDs[0]: "worker-a",
+		taskIDs[1]: "worker-b",
+		taskIDs[2]: "worker-c",
+	}
+	_ = s.ReserveGang(ctx, gangID, assignments, 1)
+	_, _ = s.ClaimReservedJob(ctx, "worker-a")
+
+	err := s.FailGang(ctx, gangID, true)
+	if err != nil {
+		t.Fatalf("FailGang: %v", err)
+	}
+
+	// Running task 0 should be untouched
+	job0, _ := s.GetJob(ctx, taskIDs[0])
+	if job0.Status != StatusRunning {
+		t.Errorf("running task should be untouched, got %q", job0.Status)
+	}
+
+	// Reserved tasks 1 and 2 should become blocked (retry)
+	for _, id := range taskIDs[1:] {
+		job, _ := s.GetJob(ctx, id)
+		if job.Status != StatusBlocked {
+			t.Errorf("task %s status = %q, want blocked (retry)", id, job.Status)
+		}
+	}
+}
+
+func testFailGangPermanent(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 3})
+
+	// Reserve, claim task 0, mark it done
+	assignments := map[string]string{
+		taskIDs[0]: "worker-a",
+		taskIDs[1]: "worker-b",
+		taskIDs[2]: "worker-c",
+	}
+	_ = s.ReserveGang(ctx, gangID, assignments, 1)
+	_, _ = s.ClaimReservedJob(ctx, "worker-a")
+	s.UpdateJobStatus(ctx, taskIDs[0], StatusDone)
+
+	err := s.FailGang(ctx, gangID, false)
+	if err != nil {
+		t.Fatalf("FailGang: %v", err)
+	}
+
+	// Done task 0 should be untouched
+	job0, _ := s.GetJob(ctx, taskIDs[0])
+	if job0.Status != StatusDone {
+		t.Errorf("done task should be untouched, got %q", job0.Status)
+	}
+
+	// Reserved tasks 1 and 2 should become failed
+	for _, id := range taskIDs[1:] {
+		job, _ := s.GetJob(ctx, id)
+		if job.Status != StatusFailed {
+			t.Errorf("task %s status = %q, want failed", id, job.Status)
+		}
+	}
+}

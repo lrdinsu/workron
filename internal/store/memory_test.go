@@ -173,6 +173,57 @@ func TestMemory_AddJobDefaultFields(t *testing.T) {
 	testAddJobDefaultFields(t, newTestMemoryStore)
 }
 
+// --- GangStore compliance tests ---
+
+func newTestMemoryGangJobStore(t *testing.T) gangJobStore {
+	t.Helper()
+	return NewMemoryStore()
+}
+
+func TestMemory_AddGang(t *testing.T) {
+	testAddGang(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_ListGangTasks(t *testing.T) {
+	testListGangTasks(t, newTestMemoryGangJobStore)
+
+}
+func TestMemory_ListGangTasksEmpty(t *testing.T) {
+	testListGangTasksEmpty(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_ReserveGang(t *testing.T) {
+	testReserveGang(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_ReserveGangNotBlocked(t *testing.T) {
+	testReserveGangNotBlocked(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_ClaimReservedJob(t *testing.T) {
+	testClaimReservedJob(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_ClaimReservedJobWrongWorker(t *testing.T) {
+	testClaimReservedJobWrongWorker(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_RollbackGang(t *testing.T) {
+	testRollbackGang(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_RollbackGangSkipsRunning(t *testing.T) {
+	testRollbackGangSkipsRunning(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_FailGangRetry(t *testing.T) {
+	testFailGangRetry(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_FailGangPermanent(t *testing.T) {
+	testFailGangPermanent(t, newTestMemoryGangJobStore)
+}
+
 func TestMemoryStore_AddAndClaimJob(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()
