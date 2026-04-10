@@ -529,3 +529,134 @@ func (s *SQLiteStore) SetWorkerHeartbeat(id string, t time.Time) {
 		panic(fmt.Sprintf("sqlite: set worker heartbeat: %v", err))
 	}
 }
+
+// --- GangStore implementation ---
+
+// AddGang creates N tasks sharing the same gang_id. All start as blocked.
+func (s *SQLiteStore) AddGang(ctx context.Context, params AddJobParams) (string, []string) {
+	gangID := generateGangID()
+	now := time.Now()
+	taskIDs := make([]string, params.GangSize)
+
+	var resourcesJSON *string
+	if params.Resources != nil {
+		b, err := json.Marshal(params.Resources)
+		if err != nil {
+			panic(fmt.Sprintf("sqlite: marshal resources: %v", err))
+		}
+		s := string(b)
+		resourcesJSON = &s
+	}
+
+	for i := 0; i < params.GangSize; i++ {
+		id := generateID()
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO jobs (id, command, status, created_at, max_retries, attempts, depends_on,
+			                    resources, priority, queue_name, gang_id, gang_size, gang_index)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, params.Command, string(StatusBlocked), now, 3, 0, "[]",
+			resourcesJSON, params.Priority, params.QueueName,
+			gangID, params.GangSize, i,
+		)
+		if err != nil {
+			panic(fmt.Sprintf("sqlite: add gang task: %v", err))
+		}
+		taskIDs[i] = id
+	}
+
+	return gangID, taskIDs
+}
+
+// ListGangTasks returns all tasks for a gang, sorted by gang_index.
+func (s *SQLiteStore) ListGangTasks(ctx context.Context, gangID string) []*Job {
+	return s.queryJobs(ctx, `SELECT `+jobColumns+` FROM jobs WHERE gang_id = ? ORDER BY gang_index`, gangID)
+}
+
+// ReserveGang atomically transitions all blocked gang tasks to reserved.
+// SQLite's single-connection pool naturally serializes this.
+func (s *SQLiteStore) ReserveGang(ctx context.Context, gangID string, assignments map[string]string, epoch int) error {
+	// Check all tasks are blocked
+	var nonBlocked int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM jobs WHERE gang_id = ? AND status != 'blocked'`, gangID,
+	).Scan(&nonBlocked)
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: check gang status: %v", err))
+	}
+	if nonBlocked > 0 {
+		return fmt.Errorf("gang %s: %d tasks are not blocked", gangID, nonBlocked)
+	}
+
+	now := time.Now()
+	for jobID, workerID := range assignments {
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE jobs SET status = 'reserved', worker_id = ?, reservation_epoch = ?, reserved_at = ?
+			 WHERE id = ? AND gang_id = ?`,
+			workerID, epoch, now, jobID, gangID,
+		)
+		if err != nil {
+			panic(fmt.Sprintf("sqlite: reserve gang task: %v", err))
+		}
+	}
+
+	return nil
+}
+
+// ClaimReservedJob finds one reserved job assigned to workerID and transitions it to running.
+func (s *SQLiteStore) ClaimReservedJob(ctx context.Context, workerID string) (*Job, bool) {
+	row := s.db.QueryRowContext(ctx, `
+		UPDATE jobs SET status = 'running', started_at = ?, attempts = attempts + 1, last_heartbeat = NULL
+		WHERE id = (SELECT id FROM jobs WHERE status = 'reserved' AND worker_id = ? LIMIT 1)
+		RETURNING `+jobColumns,
+		time.Now(), workerID,
+	)
+	return scanJob(row)
+}
+
+// RollbackGang moves all reserved tasks in a gang back to blocked.
+func (s *SQLiteStore) RollbackGang(ctx context.Context, gangID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET status = 'blocked', worker_id = '', reserved_at = NULL
+		 WHERE gang_id = ? AND status = 'reserved'`,
+		gangID,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: rollback gang: %v", err))
+	}
+	return nil
+}
+
+// FailGang handles gang failure. Only changes blocked/reserved/pending siblings.
+// Running and done siblings are left untouched.
+func (s *SQLiteStore) FailGang(ctx context.Context, gangID string, retry bool) error {
+	targetStatus := string(StatusFailed)
+	if retry {
+		targetStatus = string(StatusBlocked)
+	}
+
+	var doneAt *time.Time
+	if !retry {
+		t := time.Now()
+		doneAt = &t
+	}
+
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET status = ?, worker_id = CASE WHEN ? = 'blocked' THEN '' ELSE worker_id END,
+		              reserved_at = CASE WHEN ? = 'blocked' THEN NULL ELSE reserved_at END,
+		              done_at = CASE WHEN ? = 'failed' THEN ? ELSE done_at END
+		 WHERE gang_id = ? AND status IN ('blocked', 'reserved', 'pending')`,
+		targetStatus, targetStatus, targetStatus, targetStatus, doneAt, gangID,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: fail gang: %v", err))
+	}
+	return nil
+}
+
+// SetReservedAt sets a job's reserved_at to a specific time. Used for testing.
+func (s *SQLiteStore) SetReservedAt(id string, t time.Time) {
+	_, err := s.db.Exec(`UPDATE jobs SET reserved_at = ? WHERE id = ?`, t, id)
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: set reserved_at: %v", err))
+	}
+}

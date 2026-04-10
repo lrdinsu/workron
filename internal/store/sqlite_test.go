@@ -246,3 +246,59 @@ func TestSQLite_ListActiveWorkers(t *testing.T) {
 func TestSQLite_RemoveStaleWorkers(t *testing.T) {
 	testRemoveStaleWorkers(t, newTestSQLiteWorkerStore)
 }
+
+// --- GangStore compliance tests ---
+
+func newTestSQLiteGangJobStore(t *testing.T) gangJobStore {
+	t.Helper()
+	s, err := NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func TestSQLite_AddGang(t *testing.T) {
+	testAddGang(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_ListGangTasks(t *testing.T) {
+	testListGangTasks(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_ListGangTasksEmpty(t *testing.T) {
+	testListGangTasksEmpty(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_ReserveGang(t *testing.T) {
+	testReserveGang(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_ReserveGangNotBlocked(t *testing.T) {
+	testReserveGangNotBlocked(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_ClaimReservedJob(t *testing.T) {
+	testClaimReservedJob(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_ClaimReservedJobWrongWorker(t *testing.T) {
+	testClaimReservedJobWrongWorker(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_RollbackGang(t *testing.T) {
+	testRollbackGang(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_RollbackGangSkipsRunning(t *testing.T) {
+	testRollbackGangSkipsRunning(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_FailGangRetry(t *testing.T) {
+	testFailGangRetry(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_FailGangPermanent(t *testing.T) {
+	testFailGangPermanent(t, newTestSQLiteGangJobStore)
+}
