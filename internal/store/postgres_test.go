@@ -348,3 +348,54 @@ func TestPostgres_ListActiveWorkers(t *testing.T) {
 func TestPostgres_RemoveStaleWorkers(t *testing.T) {
 	testRemoveStaleWorkers(t, newTestPostgresWorkerStore)
 }
+
+// --- GangStore compliance tests ---
+
+func newTestPostgresGangJobStore(t *testing.T) gangJobStore {
+	t.Helper()
+	return newTestPostgresStore(t).(*PostgresStore)
+}
+
+func TestPostgres_AddGang(t *testing.T) {
+	testAddGang(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_ListGangTasks(t *testing.T) {
+	testListGangTasks(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_ListGangTasksEmpty(t *testing.T) {
+	testListGangTasksEmpty(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_ReserveGang(t *testing.T) {
+	testReserveGang(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_ReserveGangNotBlocked(t *testing.T) {
+	testReserveGangNotBlocked(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_ClaimReservedJob(t *testing.T) {
+	testClaimReservedJob(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_ClaimReservedJobWrongWorker(t *testing.T) {
+	testClaimReservedJobWrongWorker(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_RollbackGang(t *testing.T) {
+	testRollbackGang(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_RollbackGangSkipsRunning(t *testing.T) {
+	testRollbackGangSkipsRunning(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_FailGangRetry(t *testing.T) {
+	testFailGangRetry(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_FailGangPermanent(t *testing.T) {
+	testFailGangPermanent(t, newTestPostgresGangJobStore)
+}

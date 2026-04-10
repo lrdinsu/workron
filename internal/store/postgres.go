@@ -97,6 +97,7 @@ func pgMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 		checkpoint        JSONB,
 		outputs           JSONB,
 		reservation_epoch INTEGER DEFAULT 0,
+		reserved_at       TIMESTAMPTZ,
 		preemption_epoch  INTEGER DEFAULT 0
 	)`
 	if _, err := pool.Exec(ctx, jobsSchema); err != nil {
@@ -124,7 +125,7 @@ const pgJobColumns = `id, command, status, created_at, started_at, done_at,
 	last_heartbeat, max_retries, attempts, depends_on,
 	resources, worker_id, priority, queue_name,
 	gang_id, gang_size, gang_index,
-	checkpoint, outputs, reservation_epoch, preemption_epoch`
+	checkpoint, outputs, reservation_epoch, reserved_at, preemption_epoch`
 
 func (s *PostgresStore) AddJob(ctx context.Context, params AddJobParams) string {
 	id := generateID()
@@ -190,7 +191,7 @@ func (s *PostgresStore) ClaimJob(ctx context.Context) (*Job, bool) {
 		          jobs.done_at, jobs.last_heartbeat, jobs.max_retries, jobs.attempts, jobs.depends_on,
 		          jobs.resources, jobs.worker_id, jobs.priority, jobs.queue_name,
 		          jobs.gang_id, jobs.gang_size, jobs.gang_index,
-		          jobs.checkpoint, jobs.outputs, jobs.reservation_epoch, jobs.preemption_epoch`,
+		          jobs.checkpoint, jobs.outputs, jobs.reservation_epoch, jobs.reserved_at, jobs.preemption_epoch`,
 		time.Now(),
 	)
 	return pgScanJob(row)
@@ -288,7 +289,7 @@ func pgScanJob(row pgx.Row) (*Job, bool) {
 		&j.MaxRetries, &j.Attempts, &depsJSON,
 		&resourcesJSON, &j.WorkerID, &j.Priority, &j.QueueName,
 		&j.GangID, &j.GangSize, &j.GangIndex,
-		&checkpointJSON, &outputsJSON, &j.ReservationEpoch, &j.PreemptionEpoch,
+		&checkpointJSON, &outputsJSON, &j.ReservationEpoch, &j.ReservedAt, &j.PreemptionEpoch,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, false
@@ -321,7 +322,7 @@ func (s *PostgresStore) pgQueryJobs(ctx context.Context, query string, args ...a
 			&j.MaxRetries, &j.Attempts, &depsJSON,
 			&resourcesJSON, &j.WorkerID, &j.Priority, &j.QueueName,
 			&j.GangID, &j.GangSize, &j.GangIndex,
-			&checkpointJSON, &outputsJSON, &j.ReservationEpoch, &j.PreemptionEpoch,
+			&checkpointJSON, &outputsJSON, &j.ReservationEpoch, &j.ReservedAt, &j.PreemptionEpoch,
 		); err != nil {
 			panic(fmt.Sprintf("postgres: scan job row: %v", err))
 		}
@@ -489,4 +490,196 @@ func (s *PostgresStore) pgQueryWorkers(ctx context.Context, query string, args .
 		return []*Worker{}
 	}
 	return workers
+}
+
+// --- GangStore implementation ---
+
+// AddGang creates N tasks sharing the same gang_id. All start as blocked.
+func (s *PostgresStore) AddGang(ctx context.Context, params AddJobParams) (string, []string) {
+	gangID := generateGangID()
+	now := time.Now()
+	taskIDs := make([]string, params.GangSize)
+
+	var resourcesJSON []byte
+	if params.Resources != nil {
+		var err error
+		resourcesJSON, err = json.Marshal(params.Resources)
+		if err != nil {
+			panic(fmt.Sprintf("postgres: marshal resources: %v", err))
+		}
+	}
+
+	for i := 0; i < params.GangSize; i++ {
+		id := generateID()
+		_, err := s.pool.Exec(ctx,
+			`INSERT INTO jobs (id, command, status, created_at, max_retries, attempts, depends_on,
+			                    resources, priority, queue_name, gang_id, gang_size, gang_index)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12, $13)`,
+			id, params.Command, string(StatusBlocked), now, 3, 0, "[]",
+			resourcesJSON, params.Priority, params.QueueName,
+			gangID, params.GangSize, i,
+		)
+		if err != nil {
+			panic(fmt.Sprintf("postgres: add gang task: %v", err))
+		}
+		taskIDs[i] = id
+	}
+
+	return gangID, taskIDs
+}
+
+// ListGangTasks returns all tasks for a gang, sorted by gang_index.
+func (s *PostgresStore) ListGangTasks(ctx context.Context, gangID string) []*Job {
+	return s.pgQueryJobs(ctx, `SELECT `+pgJobColumns+` FROM jobs WHERE gang_id = $1 ORDER BY gang_index`, gangID)
+}
+
+// ReserveGang atomically transitions all blocked gang tasks to reserved.
+// Uses a transaction with FOR UPDATE ORDER BY id for deterministic lock ordering.
+func (s *PostgresStore) ReserveGang(ctx context.Context, gangID string, assignments map[string]string, epoch int) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin reserve gang tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock all gang rows in deterministic order to prevent deadlocks
+	rows, err := tx.Query(ctx,
+		`SELECT id, status FROM jobs WHERE gang_id = $1 ORDER BY id FOR UPDATE`, gangID,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: lock gang rows: %w", err)
+	}
+
+	var ids []string
+	for rows.Next() {
+		var id, status string
+		if err := rows.Scan(&id, &status); err != nil {
+			rows.Close()
+			return fmt.Errorf("postgres: scan gang row: %w", err)
+		}
+		if status != string(StatusBlocked) {
+			rows.Close()
+			return fmt.Errorf("gang %s: task %s has status %s, expected blocked", gangID, id, status)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	now := time.Now()
+	for _, jobID := range ids {
+		workerID, ok := assignments[jobID]
+		if !ok {
+			return fmt.Errorf("gang %s: no assignment for task %s", gangID, jobID)
+		}
+		_, err := tx.Exec(ctx,
+			`UPDATE jobs SET status = 'reserved', worker_id = $1, reservation_epoch = $2, reserved_at = $3
+			 WHERE id = $4`,
+			workerID, epoch, now, jobID,
+		)
+		if err != nil {
+			return fmt.Errorf("postgres: reserve gang task: %w", err)
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+// ClaimReservedJob finds one reserved job assigned to workerID and transitions it to running.
+// Uses FOR UPDATE SKIP LOCKED for concurrent safety.
+func (s *PostgresStore) ClaimReservedJob(ctx context.Context, workerID string) (*Job, bool) {
+	row := s.pool.QueryRow(ctx, `
+		WITH claimed AS (
+			SELECT id FROM jobs
+			WHERE status = 'reserved' AND worker_id = $1
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE jobs SET status = 'running', started_at = $2, attempts = attempts + 1, last_heartbeat = NULL
+		FROM claimed WHERE jobs.id = claimed.id
+		RETURNING jobs.id, jobs.command, jobs.status, jobs.created_at, jobs.started_at,
+		          jobs.done_at, jobs.last_heartbeat, jobs.max_retries, jobs.attempts, jobs.depends_on,
+		          jobs.resources, jobs.worker_id, jobs.priority, jobs.queue_name,
+		          jobs.gang_id, jobs.gang_size, jobs.gang_index,
+		          jobs.checkpoint, jobs.outputs, jobs.reservation_epoch, jobs.reserved_at, jobs.preemption_epoch`,
+		workerID, time.Now(),
+	)
+	return pgScanJob(row)
+}
+
+// RollbackGang moves all reserved tasks in a gang back to blocked.
+func (s *PostgresStore) RollbackGang(ctx context.Context, gangID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status = 'blocked', worker_id = '', reserved_at = NULL
+		 WHERE gang_id = $1 AND status = 'reserved'`,
+		gangID,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("postgres: rollback gang: %v", err))
+	}
+	return nil
+}
+
+// FailGang handles gang failure. Only changes blocked/reserved/pending siblings.
+// Running and done siblings are left untouched.
+func (s *PostgresStore) FailGang(ctx context.Context, gangID string, retry bool) error {
+	targetStatus := string(StatusFailed)
+	if retry {
+		targetStatus = string(StatusBlocked)
+	}
+
+	var doneAt *time.Time
+	if !retry {
+		t := time.Now()
+		doneAt = &t
+	}
+
+	_, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status = $1,
+		              worker_id = CASE WHEN $1 = 'blocked' THEN '' ELSE worker_id END,
+		              reserved_at = CASE WHEN $1 = 'blocked' THEN NULL ELSE reserved_at END,
+		              done_at = CASE WHEN $1 = 'failed' THEN $2 ELSE done_at END
+		 WHERE gang_id = $3 AND status IN ('blocked', 'reserved', 'pending')`,
+		targetStatus, doneAt, gangID,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("postgres: fail gang: %v", err))
+	}
+	return nil
+}
+
+// WithGangAdmissionLock uses a PostgreSQL transaction-scoped advisory lock
+// to ensure only one scheduler instance runs gang admission at a time.
+// Uses lock ID 2 (separate from the reaper's lock ID 1).
+func (s *PostgresStore) WithGangAdmissionLock(ctx context.Context, fn func(ctx context.Context)) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin gang admission lock tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var acquired bool
+	err = tx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock($1)", int64(2)).Scan(&acquired)
+	if err != nil {
+		return false, fmt.Errorf("try gang admission advisory lock: %w", err)
+	}
+
+	if !acquired {
+		return false, nil
+	}
+
+	fn(ctx)
+
+	if err := tx.Commit(ctx); err != nil {
+		return true, fmt.Errorf("commit gang admission lock tx: %w", err)
+	}
+	return true, nil
+}
+
+// SetReservedAt sets a job's reserved_at to a specific time. Used for testing.
+func (s *PostgresStore) SetReservedAt(id string, t time.Time) {
+	_, err := s.pool.Exec(context.Background(),
+		`UPDATE jobs SET reserved_at = $1 WHERE id = $2`, t, id)
+	if err != nil {
+		panic(fmt.Sprintf("postgres: set reserved_at: %v", err))
+	}
 }

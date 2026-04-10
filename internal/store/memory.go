@@ -1,8 +1,10 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 )
@@ -306,5 +308,171 @@ func (s *MemoryStore) SetWorkerHeartbeat(id string, t time.Time) {
 
 	if w, exists := s.workers[id]; exists {
 		w.LastHeartbeat = t
+	}
+}
+
+// --- GangStore implementation ---
+
+// AddGang creates N tasks sharing the same gang_id. All start as blocked.
+func (s *MemoryStore) AddGang(_ context.Context, params AddJobParams) (string, []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	gangID := generateGangID()
+	taskIDs := make([]string, params.GangSize)
+
+	for i := 0; i < params.GangSize; i++ {
+		id := generateID()
+		s.jobs[id] = &Job{
+			ID:         id,
+			Command:    params.Command,
+			Status:     StatusBlocked,
+			CreatedAt:  time.Now(),
+			MaxRetries: 3,
+			Resources:  params.Resources,
+			Priority:   params.Priority,
+			QueueName:  params.QueueName,
+			GangID:     gangID,
+			GangSize:   params.GangSize,
+			GangIndex:  i,
+		}
+		taskIDs[i] = id
+	}
+
+	return gangID, taskIDs
+}
+
+// ListGangTasks returns all tasks for a gang, sorted by gang_index.
+func (s *MemoryStore) ListGangTasks(_ context.Context, gangID string) []*Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	tasks := make([]*Job, 0)
+
+	for _, job := range s.jobs {
+		if job.GangID == gangID {
+			jobCopy := *job
+			tasks = append(tasks, &jobCopy)
+		}
+	}
+
+	// Sort by GangIndex
+	slices.SortFunc(tasks, func(a, b *Job) int {
+		return cmp.Compare(a.GangIndex, b.GangIndex)
+	})
+
+	return tasks
+}
+
+// ReserveGang atomically transitions all blocked gang tasks to reserved.
+func (s *MemoryStore) ReserveGang(_ context.Context, gangID string, assignments map[string]string, epoch int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Collect gang tasks and verify all are blocked
+	var tasks []*Job
+	for _, job := range s.jobs {
+		if job.GangID == gangID {
+			tasks = append(tasks, job)
+		}
+	}
+
+	for _, task := range tasks {
+		if task.Status != StatusBlocked {
+			return fmt.Errorf("gang %s: task %s has status %s, expected blocked", gangID, task.ID, task.Status)
+		}
+	}
+
+	// All checks passed, apply atomically
+	now := time.Now()
+	for _, task := range tasks {
+		workerID, ok := assignments[task.ID]
+		if !ok {
+			return fmt.Errorf("gang %s: no assignment for task %s", gangID, task.ID)
+		}
+		task.Status = StatusReserved
+		task.WorkerID = workerID
+		task.ReservationEpoch = epoch
+		task.ReservedAt = &now
+	}
+
+	return nil
+}
+
+// ClaimReservedJob finds one reserved job assigned to workerID and transitions it to running.
+func (s *MemoryStore) ClaimReservedJob(_ context.Context, workerID string) (*Job, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, job := range s.jobs {
+		if job.Status == StatusReserved && job.WorkerID == workerID {
+			job.Status = StatusRunning
+			t := time.Now()
+			job.StartedAt = &t
+			job.LastHeartbeat = nil
+			job.Attempts++
+			jobCopy := *job
+			return &jobCopy, true
+		}
+	}
+
+	return nil, false
+}
+
+// RollbackGang moves all reserved tasks in a gang back to blocked.
+func (s *MemoryStore) RollbackGang(_ context.Context, gangID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, job := range s.jobs {
+		if job.GangID == gangID && job.Status == StatusReserved {
+			job.Status = StatusBlocked
+			job.WorkerID = ""
+			job.ReservedAt = nil
+		}
+	}
+
+	return nil
+}
+
+// FailGang handles gang failure. Only changes blocked/reserved/pending siblings.
+// Running and done siblings are left untouched.
+func (s *MemoryStore) FailGang(_ context.Context, gangID string, retry bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	targetStatus := StatusFailed
+	if retry {
+		targetStatus = StatusBlocked
+	}
+
+	for _, job := range s.jobs {
+		if job.GangID != gangID {
+			continue
+		}
+		switch job.Status {
+		case StatusBlocked, StatusReserved, StatusPending:
+			job.Status = targetStatus
+			if job.Status == StatusBlocked {
+				job.WorkerID = ""
+				job.ReservedAt = nil
+			}
+			if job.Status == StatusFailed {
+				t := time.Now()
+				job.DoneAt = &t
+			}
+		}
+	}
+
+	return nil
+}
+
+// SetReservedAt sets a job's reserved_at to a specific time. Used for testing.
+func (s *MemoryStore) SetReservedAt(id string, t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if job, exists := s.jobs[id]; exists {
+		job.ReservedAt = &t
 	}
 }
