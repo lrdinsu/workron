@@ -14,7 +14,7 @@ type GangCandidate struct {
 	GangSize  int
 	Priority  int
 	CreatedAt time.Time
-	Resources *store.ResourceSpec
+	Resources *store.ResourceSpec // for each task in a gang, including VRAM and memory.
 	TaskIDs   []string
 }
 
