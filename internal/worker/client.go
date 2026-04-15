@@ -14,23 +14,31 @@ import (
 // It implements JobSource so the Worker can use it interchangeably with a direct store.
 type SchedulerClient struct {
 	baseURL    string
+	workerID   string // included in ClaimJob requests for gang reservation matching
 	httpClient *http.Client
 	logger     *slog.Logger
 }
 
 // NewSchedulerClient creates a client pointing at the given scheduler URL.
-func NewSchedulerClient(baseURL string, logger *slog.Logger) *SchedulerClient {
+// workerID is sent with ClaimJob requests so the scheduler can match reserved gang tasks to this worker.
+func NewSchedulerClient(baseURL string, workerID string, logger *slog.Logger) *SchedulerClient {
 	return &SchedulerClient{
 		baseURL:    baseURL,
+		workerID:   workerID,
 		httpClient: &http.Client{},
 		logger:     logger,
 	}
 }
 
 // ClaimJob calls GET /jobs/next on the scheduler to atomically claim a pending job.
+// If workerID is set, appends ?worker_id= so the scheduler can prioritize reserved gang tasks for this worker.
 // Returns (nil, false) if no jobs are available (204 No Content).
 func (c *SchedulerClient) ClaimJob(ctx context.Context) (*store.Job, bool) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/jobs/next", nil)
+	url := c.baseURL + "/jobs/next"
+	if c.workerID != "" {
+		url += "?worker_id=" + c.workerID
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, false
 	}
