@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -222,12 +224,33 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleClaimJob handles GET /jobs/next
-// Atomically claims one pending job and returns it to the calling worker.
+// Accepts optional query param: ?worker_id=xxx
+// If worker_id is set and the worker has a reserved gang task, that task is
+// claimed first (with GANG_* env vars populated). Otherwise falls through
+// to claiming a regular pending job.
 // Returns 204 No Content if no jobs are available.
 func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 	logger := s.requestLogger(r.Context())
+	ctx := r.Context()
+	workerID := r.URL.Query().Get("worker_id")
 
-	job, found := s.store.ClaimJob(r.Context())
+	// Try reserved gang task first if worker_id is provided
+	if workerID != "" && s.gangStore != nil {
+		job, found := s.gangStore.ClaimReservedJob(ctx, workerID)
+		if found {
+			job.Env = s.buildGangEnv(ctx, job)
+			s.metrics.JobsClaimed.Inc()
+			if job.StartedAt != nil {
+				s.metrics.JobQueueWait.Observe(job.StartedAt.Sub(job.CreatedAt).Seconds())
+			}
+			logger.Info("gang task claimed", "job_id", job.ID, "gang_id", job.GangID, "worker_id", workerID)
+			s.writeJSON(w, http.StatusOK, job)
+			return
+		}
+	}
+
+	// Fall through to regular pending job
+	job, found := s.store.ClaimJob(ctx)
 	if !found {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -239,6 +262,36 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.Info("job claimed", "job_id", job.ID)
 	s.writeJSON(w, http.StatusOK, job)
+}
+
+// buildGangEnv constructs GANG_* environment variables for a gang task.
+// GANG_PEERS is a comma-separated list of worker ExecAddr values, ordered by gang_index.
+func (s *Server) buildGangEnv(ctx context.Context, job *store.Job) map[string]string {
+	env := map[string]string{
+		"GANG_ID":    job.GangID,
+		"GANG_SIZE":  strconv.Itoa(job.GangSize),
+		"GANG_INDEX": strconv.Itoa(job.GangIndex),
+	}
+
+	if s.workerStore == nil {
+		return env
+	}
+
+	// Build GANG_PEERS from sibling tasks' worker ExecAddrs
+	tasks := s.gangStore.ListGangTasks(ctx, job.GangID)
+	peers := make([]string, len(tasks))
+	for _, task := range tasks {
+		if task.WorkerID == "" {
+			continue
+		}
+		w, found := s.workerStore.GetWorker(ctx, task.WorkerID)
+		if found {
+			peers[task.GangIndex] = w.ExecAddr
+		}
+	}
+	env["GANG_PEERS"] = strings.Join(peers, ",")
+
+	return env
 }
 
 // handleJobDone handles POST /jobs/{id}/done
