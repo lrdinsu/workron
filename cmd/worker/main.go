@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 
+	"github.com/google/uuid"
 	"github.com/lrdinsu/workron/internal/worker"
 )
 
@@ -20,10 +22,16 @@ func main() {
 	// Parse CLI flags
 	schedulerURL := flag.String("scheduler", "http://localhost:8080", "scheduler base URL")
 	numWorkers := flag.Int("workers", 3, "number of concurrent worker goroutines")
+	workerID := flag.String("worker-id", "", "unique worker ID (auto-generated if empty)")
 	flag.Parse()
 
+	// Generate worker ID if not provided
+	if *workerID == "" {
+		*workerID = fmt.Sprintf("worker-%s", uuid.New().String()[:8])
+	}
+
 	// Create the HTTP client that talks to the scheduler
-	client := worker.NewSchedulerClient(*schedulerURL, slog.Default())
+	client := worker.NewSchedulerClient(*schedulerURL, *workerID, slog.Default())
 
 	// Context for graceful shutdown, canceled when OS signal is received
 	ctx, cancel := context.WithCancel(context.Background())

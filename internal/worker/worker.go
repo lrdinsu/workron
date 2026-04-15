@@ -84,7 +84,7 @@ func (w *Worker) process(ctx context.Context, job *store.Job) {
 	defer hbCancel()
 	go w.sendHeartbeats(hbCtx, job.ID)
 
-	err := w.executor.Execute(ctx, job.Command, nil)
+	err := w.executor.Execute(ctx, job.Command, job.Env)
 	if err != nil {
 		if job.Attempts < job.MaxRetries {
 			w.logger.Warn("job failed, retrying", "job_id", job.ID, "attempt", job.Attempts, "max_retries", job.MaxRetries, "error", err)

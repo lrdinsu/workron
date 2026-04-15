@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +25,7 @@ const loggerKey contextKey = "logger"
 type Server struct {
 	store       store.JobStore
 	workerStore store.WorkerStore // nil if the store doesn't implement WorkerStore
+	gangStore   store.GangStore   // nil if the store doesn't implement GangStore
 	mux         *http.ServeMux
 	logger      *slog.Logger
 	metrics     *metrics.Metrics
@@ -45,10 +48,13 @@ func NewServer(s store.JobStore, logger *slog.Logger, m *metrics.Metrics, regist
 		startTime:  time.Now(),
 	}
 
-	// Discover WorkerStore capability via type assertion.
-	// All three backends (Memory, SQLite, Postgres) implement it.
+	// Discover optional store capabilities via type assertion.
+	// All three backends (Memory, SQLite, Postgres) implement both.
 	if ws, ok := s.(store.WorkerStore); ok {
 		srv.workerStore = ws
+	}
+	if gs, ok := s.(store.GangStore); ok {
+		srv.gangStore = gs
 	}
 	srv.registerRoutes()
 	return srv
@@ -95,18 +101,29 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /workers/register", s.handleRegisterWorker)
 	s.mux.HandleFunc("POST /workers/{id}/heartbeat", s.handleWorkerHeartbeat)
 	s.mux.HandleFunc("GET /workers", s.handleListWorkers)
+	s.mux.HandleFunc("GET /gangs/{gang_id}", s.handleGetGang)
 	s.mux.Handle("GET /metrics", promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
 }
 
 // submitJobRequest is the expected JSON body for POST /jobs
 type submitJobRequest struct {
-	Command   string   `json:"command"`
-	DependsOn []string `json:"depends_on,omitempty"`
+	Command   string              `json:"command"`
+	DependsOn []string            `json:"depends_on,omitempty"`
+	GangSize  int                 `json:"gang_size,omitempty"`
+	Resources *store.ResourceSpec `json:"resources,omitempty"`
+	Priority  int                 `json:"priority,omitempty"`
+}
+
+// gangSubmitResponse is returned when gang_size > 1.
+type gangSubmitResponse struct {
+	GangID string   `json:"gang_id"`
+	Tasks  []string `json:"tasks"`
 }
 
 // handleSubmitJob handles POST /jobs
 // Accepts: {"command": "echo hello", "depends_on": ["job-123"]}
-// Returns: the created job as JSON (201)
+// With gang_size > 1: {"command": "torchrun train.py", "gang_size": 4, "resources": {"vram_mb": 8192}}
+// Returns: the created job as JSON (201), or gang response for gang submissions.
 // Returns 400 if command is empty, dependencies are missing, or a cycle is detected.
 func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	logger := s.requestLogger(r.Context())
@@ -124,6 +141,31 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Gang submission path
+	if req.GangSize > 1 {
+		if s.gangStore == nil {
+			http.Error(w, "gang scheduling not supported", http.StatusNotImplemented)
+			return
+		}
+		if len(req.DependsOn) > 0 {
+			http.Error(w, "gang jobs cannot have dependencies", http.StatusBadRequest)
+			return
+		}
+
+		gangID, taskIDs := s.gangStore.AddGang(ctx, store.AddJobParams{
+			Command:   req.Command,
+			GangSize:  req.GangSize,
+			Resources: req.Resources,
+			Priority:  req.Priority,
+		})
+
+		s.metrics.JobsSubmitted.Add(float64(req.GangSize))
+		logger.Info("gang submitted", "gang_id", gangID, "gang_size", req.GangSize, "command", req.Command)
+		s.writeJSON(w, http.StatusCreated, gangSubmitResponse{GangID: gangID, Tasks: taskIDs})
+		return
+	}
+
+	// Regular single-job path
 	if len(req.DependsOn) > 0 {
 		if err := store.ValidateDependencies(ctx, s.store, req.DependsOn); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -134,12 +176,32 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	id := s.store.AddJob(ctx, store.AddJobParams{
 		Command:   req.Command,
 		DependsOn: req.DependsOn,
+		Resources: req.Resources,
+		Priority:  req.Priority,
 	})
 	job, _ := s.store.GetJob(ctx, id)
 
 	s.metrics.JobsSubmitted.Inc()
 	logger.Info("job submitted", "job_id", id, "command", req.Command, "depends_on", req.DependsOn)
 	s.writeJSON(w, http.StatusCreated, job)
+}
+
+// handleGetGang handles GET /gangs/{gang_id}
+// Returns all tasks in a gang, sorted by gang_index.
+func (s *Server) handleGetGang(w http.ResponseWriter, r *http.Request) {
+	if s.gangStore == nil {
+		http.Error(w, "gang scheduling not supported", http.StatusNotImplemented)
+		return
+	}
+
+	gangID := r.PathValue("gang_id")
+	tasks := s.gangStore.ListGangTasks(r.Context(), gangID)
+	if len(tasks) == 0 {
+		http.Error(w, "gang not found", http.StatusNotFound)
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, tasks)
 }
 
 // handleGetJob handles GET /jobs/{id}
@@ -162,12 +224,33 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleClaimJob handles GET /jobs/next
-// Atomically claims one pending job and returns it to the calling worker.
+// Accepts optional query param: ?worker_id=xxx
+// If worker_id is set and the worker has a reserved gang task, that task is
+// claimed first (with GANG_* env vars populated). Otherwise falls through
+// to claiming a regular pending job.
 // Returns 204 No Content if no jobs are available.
 func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 	logger := s.requestLogger(r.Context())
+	ctx := r.Context()
+	workerID := r.URL.Query().Get("worker_id")
 
-	job, found := s.store.ClaimJob(r.Context())
+	// Try reserved gang task first if worker_id is provided
+	if workerID != "" && s.gangStore != nil {
+		job, found := s.gangStore.ClaimReservedJob(ctx, workerID)
+		if found {
+			job.Env = s.buildGangEnv(ctx, job)
+			s.metrics.JobsClaimed.Inc()
+			if job.StartedAt != nil {
+				s.metrics.JobQueueWait.Observe(job.StartedAt.Sub(job.CreatedAt).Seconds())
+			}
+			logger.Info("gang task claimed", "job_id", job.ID, "gang_id", job.GangID, "worker_id", workerID)
+			s.writeJSON(w, http.StatusOK, job)
+			return
+		}
+	}
+
+	// Fall through to regular pending job
+	job, found := s.store.ClaimJob(ctx)
 	if !found {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -179,6 +262,36 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.Info("job claimed", "job_id", job.ID)
 	s.writeJSON(w, http.StatusOK, job)
+}
+
+// buildGangEnv constructs GANG_* environment variables for a gang task.
+// GANG_PEERS is a comma-separated list of worker ExecAddr values, ordered by gang_index.
+func (s *Server) buildGangEnv(ctx context.Context, job *store.Job) map[string]string {
+	env := map[string]string{
+		"GANG_ID":    job.GangID,
+		"GANG_SIZE":  strconv.Itoa(job.GangSize),
+		"GANG_INDEX": strconv.Itoa(job.GangIndex),
+	}
+
+	if s.workerStore == nil {
+		return env
+	}
+
+	// Build GANG_PEERS from sibling tasks' worker ExecAddrs
+	tasks := s.gangStore.ListGangTasks(ctx, job.GangID)
+	peers := make([]string, len(tasks))
+	for _, task := range tasks {
+		if task.WorkerID == "" {
+			continue
+		}
+		w, found := s.workerStore.GetWorker(ctx, task.WorkerID)
+		if found {
+			peers[task.GangIndex] = w.ExecAddr
+		}
+	}
+	env["GANG_PEERS"] = strings.Join(peers, ",")
+
+	return env
 }
 
 // handleJobDone handles POST /jobs/{id}/done
