@@ -90,7 +90,8 @@ func reap(ctx context.Context, s store.JobStore, logger *slog.Logger, m *metrics
 		}
 
 		// No heartbeat at all, or heartbeat is stale: the worker is assumed dead
-		if job.Attempts < job.MaxRetries {
+		retry := job.Attempts < job.MaxRetries
+		if retry {
 			logger.Warn("stale heartbeat, re-queuing", "job_id", job.ID, "attempt", job.Attempts, "max_retries", job.MaxRetries)
 			s.UpdateJobStatus(ctx, job.ID, store.StatusPending)
 			m.JobsReaped.WithLabelValues("requeued").Inc()
@@ -98,6 +99,16 @@ func reap(ctx context.Context, s store.JobStore, logger *slog.Logger, m *metrics
 			logger.Error("stale heartbeat, marking failed", "job_id", job.ID, "attempt", job.Attempts)
 			s.UpdateJobStatus(ctx, job.ID, store.StatusFailed)
 			m.JobsReaped.WithLabelValues("failed").Inc()
+		}
+
+		// Gang failure: propagate to blocked/reserved/pending siblings
+		if job.GangID != "" {
+			if gs, ok := s.(store.GangStore); ok {
+				logger.Info("reaper triggering gang failure", "gang_id", job.GangID, "job_id", job.ID)
+				if err := gs.FailGang(ctx, job.GangID, retry); err != nil {
+					logger.Error("reaper failed to propagate gang failure", "gang_id", job.GangID, "error", err)
+				}
+			}
 		}
 	}
 }
