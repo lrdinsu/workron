@@ -347,7 +347,8 @@ func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Retry logic: if attempts haven't been exhausted, re-queue as pending
-	if job.Attempts < job.MaxRetries {
+	retry := job.Attempts < job.MaxRetries
+	if retry {
 		logger.Warn("job failed, re-queuing", "job_id", id, "attempt", job.Attempts, "max_retries", job.MaxRetries)
 		s.store.UpdateJobStatus(ctx, id, store.StatusPending)
 		s.metrics.JobsRetried.Inc()
@@ -355,6 +356,19 @@ func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 		logger.Error("job failed permanently", "job_id", id, "attempt", job.Attempts)
 		s.store.UpdateJobStatus(ctx, id, store.StatusFailed)
 		s.metrics.JobsFailed.Inc()
+	}
+
+	// Gang failure: propagate to blocked/reserved/pending siblings.
+	// Running and done siblings are left untouched.
+	if job.GangID != "" && s.gangStore != nil {
+		if retry {
+			logger.Info("gang task failed, retrying gang siblings", "gang_id", job.GangID, "job_id", id)
+		} else {
+			logger.Info("gang task failed permanently, failing gang siblings", "gang_id", job.GangID, "job_id", id)
+		}
+		if err := s.gangStore.FailGang(ctx, job.GangID, retry); err != nil {
+			logger.Error("failed to propagate gang failure", "gang_id", job.GangID, "error", err)
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)

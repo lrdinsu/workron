@@ -89,6 +89,9 @@ func main() {
 	// Start the heartbeat reaper to detect dead workers
 	go scheduler.StartReaper(ctx, s, slog.Default(), m)
 
+	// Start the gang admission cycle to place blocked gangs on workers
+	go scheduler.StartGangAdmission(ctx, s, slog.Default())
+
 	// Only start local workers in standalone mode
 	// Note: in standalone mode, local workers call store methods directly,
 	// bypassing HTTP handlers. Prometheus counters (claimed, completed, etc.)

@@ -114,6 +114,14 @@ type ReaperLocker interface {
 	WithReaperLock(ctx context.Context, fn func(ctx context.Context)) (acquired bool, err error)
 }
 
+// GangAdmissionLocker is an optional interface for coordinating gang admission
+// across multiple scheduler instances. Uses a separate advisory lock from the
+// reaper (different lock ID). Only PostgresStore implements this;
+// MemoryStore and SQLiteStore run admission unconditionally.
+type GangAdmissionLocker interface {
+	WithGangAdmissionLock(ctx context.Context, fn func(ctx context.Context)) (acquired bool, err error)
+}
+
 // WorkerStore defines operations for managing worker nodes.
 // Like ReaperLocker, this is an optional interface discovered via type assertion.
 // All three store backends (Memory, SQLite, Postgres) implement it.
