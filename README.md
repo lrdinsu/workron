@@ -14,6 +14,8 @@ Jobs are persisted to SQLite or PostgreSQL, so in-flight and completed work surv
 
 Workers register with the scheduler on startup, reporting their resource capacity (VRAM, memory) and execution address. Workers send periodic heartbeats while processing jobs. A background reaper on the scheduler detects stale job heartbeats and re-queues orphaned jobs, and marks workers with stale heartbeats as offline, ensuring no work is silently lost when a worker crashes.
 
+For distributed training and other multi-worker workloads, Workron supports gang scheduling: a single job request creates N coordinated tasks that must all be placed on suitable workers before any of them start. A background admission cycle reserves workers atomically, so tasks never start partially.
+
 If you are curious about the design decisions and trade-offs behind this project, I wrote about the journey here:
 
 - 📝 [Before the Code: Designing a Distributed Job Scheduler in Go](https://lrdinsu.github.io/posts/designing-distributed-job-scheduler-go/)
@@ -21,6 +23,7 @@ If you are curious about the design decisions and trade-offs behind this project
 - 📝 [Splitting and Surviving Failures: HTTP Workers and Heartbeat Detection in Go](https://lrdinsu.github.io/posts/splitting-and-surviving-failures-workron/)
 - 📝 [Surviving the Crash: Adding SQLite Persistence Without Touching Business Logic](https://lrdinsu.github.io/posts/persisting-jobs-with-sqlite-workron/)
 - 📝 [DAG Dependencies: Teaching a Job Scheduler to Wait](https://lrdinsu.github.io/posts/dag-dependencies-workron/)
+- 📝 [Making the Invisible Visible: Structured Logging, Metrics, and Request Tracing](https://lrdinsu.github.io/posts/observability-slog-prometheus-workron/)
 
 
 ---
@@ -42,11 +45,11 @@ If you are curious about the design decisions and trade-offs behind this project
 - **Health endpoint:** `GET /health` returns instance ID, uptime, and status for load balancer checks
 - **Job resource requirements:** Jobs declare VRAM and memory needs, with priority and queue assignment
 - **Worker registration:** Workers register with resource capacity, execution address, and tags; stale workers marked offline automatically
-- **Gang scheduling fields:** Jobs carry gang ID, size, and index for coordinated multi-worker execution
+- **Gang scheduling:** Submit N coordinated tasks that all reserve workers atomically before any start; background admission cycle places largest gangs first with capacity accounting across running and reserved jobs; gang env vars (`GANG_ID`, `GANG_SIZE`, `GANG_INDEX`, `GANG_PEERS`) injected at claim time
 - **Checkpoint and output fields:** Jobs carry opaque JSON for checkpoint/resume and output tracking
 
 **Planned — Scheduling Intelligence**
-- [ ] Gang scheduling: atomic all-or-nothing reservation of N workers for distributed workloads
+- [ ] Gang preemption: interrupt running siblings when a gang task fails, roll back the whole gang atomically
 - [ ] Priority-based preemption with checkpoint/resume
 - [ ] Queue resource quotas with cross-queue borrowing
 
@@ -75,16 +78,20 @@ Submit ──► blocked ──► pending ──► running ──► done
             (waits for all         (normal lifecycle)
              deps to be done)
 
-Future (gang scheduling + preemption):
+Gang scheduling (gang_size > 1):
 
-Submit ──► blocked ──► pending ──► reserved ──► running ──► done
-                                   (gang:        (worker
-                                    assigned      executing)
-                                    worker,
-                                    awaiting      running ──► preempting ──► preempted
-                                    claim)        (SIGTERM     (checkpoint
-                                                   sent)       saved, re-queued
-                                                               as pending)
+Submit ──► blocked ──► reserved ──► running ──► done
+            (all N      (admission   (each worker
+             tasks       cycle        claims its
+             start       places all   pre-assigned
+             blocked)    N at once)   task)
+
+Future (preemption):
+
+            running ──► preempting ──► preempted
+                        (SIGTERM       (re-queued
+                         sent)          or gang
+                                        rolled back)
 ```
 
 ### Standalone Mode
@@ -212,6 +219,7 @@ make stop-postgres
 |------|---------|-------------|
 | `--scheduler` | `http://localhost:8080` | Scheduler base URL |
 | `--workers` | `3` | Number of concurrent worker goroutines |
+| `--worker-id` | auto-generated UUID | Worker identifier; passed to `GET /jobs/next?worker_id=` to claim gang-reserved tasks |
 
 ---
 
@@ -219,13 +227,14 @@ make stop-postgres
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/jobs` | Submit a job (with optional dependencies, resources, priority) |
+| `POST` | `/jobs` | Submit a job, or a gang when `gang_size > 1` (with optional dependencies, resources, priority) |
 | `GET` | `/jobs` | List all jobs |
 | `GET` | `/jobs/{id}` | Get job status |
-| `GET` | `/jobs/next` | Claim next pending job (used by workers) |
+| `GET` | `/jobs/next` | Claim next pending job; pass `?worker_id=` to also claim gang-reserved tasks for that worker |
 | `POST` | `/jobs/{id}/done` | Report job completed |
-| `POST` | `/jobs/{id}/fail` | Report job failed (scheduler decides retry vs permanent failure) |
+| `POST` | `/jobs/{id}/fail` | Report job failed (scheduler decides retry vs permanent failure; propagates to gang siblings) |
 | `POST` | `/jobs/{id}/heartbeat` | Worker heartbeat for running job |
+| `GET` | `/gangs/{gang_id}` | List all tasks belonging to a gang |
 | `POST` | `/workers/register` | Register a worker with resource capacity |
 | `POST` | `/workers/{id}/heartbeat` | Worker liveness heartbeat |
 | `GET` | `/workers` | List all registered workers |
@@ -287,6 +296,24 @@ curl -X POST http://localhost:8080/jobs \
 ```
 
 Jobs can declare VRAM and memory requirements, a priority level (higher is more important), and a queue name. These fields are stored and returned on the job, ready for resource-aware scheduling in a future PR.
+
+#### Submit a gang (multi-worker job)
+
+```bash
+curl -X POST http://localhost:8080/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"command": "torchrun train.py", "gang_size": 4, "resources": {"vram_mb": 16384}}'
+```
+
+Response (`201 Created`):
+```json
+{
+  "gang_id": "gang-a1b2c3",
+  "tasks": ["job-1", "job-2", "job-3", "job-4"]
+}
+```
+
+All four tasks start as `blocked`. A background admission cycle places them on four distinct workers with enough VRAM each, transitions them to `reserved`, and each worker claims its pre-assigned task via `GET /jobs/next?worker_id=`. At claim time, the scheduler injects `GANG_ID`, `GANG_SIZE`, `GANG_INDEX`, and `GANG_PEERS` environment variables so the worker processes can form their collective communication ring.
 
 #### Submit a pipeline
 
@@ -407,6 +434,29 @@ Currently, if a dependency fails permanently, downstream jobs remain `blocked` i
 
 ---
 
+## Gang Scheduling
+
+Distributed training jobs (PyTorch with NCCL, Jax on TPUs, and similar collective-communication workloads) need N workers starting simultaneously. If only some start, the rest hang waiting for peers that never join. Workron solves this with reservation-based gang scheduling.
+
+**How it works:**
+
+- Submitting a job with `gang_size > 1` creates N tasks sharing a `gang_id`. All N start in `blocked` status. No worker can claim them through the normal path.
+- A background admission cycle runs every 5 seconds. On each tick it:
+  1. Rolls back reservations older than 30 seconds (workers that died before claiming).
+  2. Finds gangs where every task is `blocked`.
+  3. Sorts candidates by size (largest first), then priority, then submission time.
+  4. Computes per-worker available capacity, counting both `running` and `reserved` jobs as used.
+  5. Atomically transitions each gang's tasks to `reserved`, one per worker, and subtracts the placed capacity before considering the next gang.
+- Workers claim their assigned task by passing `?worker_id=` to `GET /jobs/next`. The scheduler returns only tasks reserved for that specific worker.
+- At claim time, the scheduler injects `GANG_ID`, `GANG_SIZE`, `GANG_INDEX`, and `GANG_PEERS` environment variables into the job's env map, so worker processes can discover each other and form their communication ring.
+- When a gang task fails, `FailGang` propagates the failure to blocked, reserved, and pending siblings. Running and done siblings are left untouched and are expected to fail on their own through peer detection or heartbeat timeout.
+
+**Multi-instance safety:** the admission cycle uses a separate PostgreSQL advisory lock (different lock ID from the reaper), so only one scheduler instance runs placement at a time. The two coordination loops never block each other.
+
+**Known limitation:** if some gang tasks start running and another task's worker dies before claiming, the stale reservation is rolled back but the already-running siblings are not preempted. The gang ends up with two running tasks and one blocked task, which does not qualify for re-placement. Active preemption of running siblings is planned for a future PR.
+
+---
+
 ## Failure Detection
 
 When a worker crashes mid-job, the scheduler detects it through missing heartbeats. A background reaper goroutine runs every 10 seconds and checks all running jobs:
@@ -462,7 +512,7 @@ workron/
 │   │   ├── collector.go         # Custom gauge collector (queries store on scrape)
 │   │   └── metrics_test.go
 │   ├── store/
-│   │   ├── store.go             # JobStore, WorkerStore interfaces, Job/Worker structs
+│   │   ├── store.go             # JobStore, WorkerStore, GangStore interfaces, Job/Worker structs
 │   │   ├── memory.go            # In-memory store implementation
 │   │   ├── memory_test.go
 │   │   ├── sqlite.go            # SQLite store implementation
@@ -473,9 +523,12 @@ workron/
 │   │   ├── dag.go               # Cycle detection + dependency validation
 │   │   └── dag_test.go
 │   ├── scheduler/
-│   │   ├── server.go            # HTTP handlers
+│   │   ├── server.go            # HTTP handlers (jobs, gangs, workers, health)
 │   │   ├── server_test.go
-│   │   ├── reaper.go            # Background heartbeat timeout checker
+│   │   ├── gang.go              # Gang admission cycle + placement logic
+│   │   ├── gang_test.go         # Unit tests for placement and capacity
+│   │   ├── gang_integration_test.go # End-to-end gang lifecycle tests
+│   │   ├── reaper.go            # Background heartbeat timeout checker (gang-aware)
 │   │   └── reaper_test.go
 │   └── worker/
 │       ├── worker.go            # Poll and execute loop
