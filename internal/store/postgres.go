@@ -98,7 +98,8 @@ func pgMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 		outputs           JSONB,
 		reservation_epoch INTEGER DEFAULT 0,
 		reserved_at       TIMESTAMPTZ,
-		preemption_epoch  INTEGER DEFAULT 0
+		preemption_epoch  INTEGER DEFAULT 0,
+		drain_started_at  TIMESTAMPTZ
 	)`
 	if _, err := pool.Exec(ctx, jobsSchema); err != nil {
 		return err
@@ -125,7 +126,8 @@ const pgJobColumns = `id, command, status, created_at, started_at, done_at,
 	last_heartbeat, max_retries, attempts, depends_on,
 	resources, worker_id, priority, queue_name,
 	gang_id, gang_size, gang_index,
-	checkpoint, outputs, reservation_epoch, reserved_at, preemption_epoch`
+	checkpoint, outputs, reservation_epoch, reserved_at, preemption_epoch,
+	drain_started_at`
 
 func (s *PostgresStore) AddJob(ctx context.Context, params AddJobParams) string {
 	id := generateID()
@@ -191,7 +193,8 @@ func (s *PostgresStore) ClaimJob(ctx context.Context) (*Job, bool) {
 		          jobs.done_at, jobs.last_heartbeat, jobs.max_retries, jobs.attempts, jobs.depends_on,
 		          jobs.resources, jobs.worker_id, jobs.priority, jobs.queue_name,
 		          jobs.gang_id, jobs.gang_size, jobs.gang_index,
-		          jobs.checkpoint, jobs.outputs, jobs.reservation_epoch, jobs.reserved_at, jobs.preemption_epoch`,
+		          jobs.checkpoint, jobs.outputs, jobs.reservation_epoch, jobs.reserved_at, jobs.preemption_epoch,
+		          jobs.drain_started_at`,
 		time.Now(),
 	)
 	return pgScanJob(row)
@@ -290,6 +293,7 @@ func pgScanJob(row pgx.Row) (*Job, bool) {
 		&resourcesJSON, &j.WorkerID, &j.Priority, &j.QueueName,
 		&j.GangID, &j.GangSize, &j.GangIndex,
 		&checkpointJSON, &outputsJSON, &j.ReservationEpoch, &j.ReservedAt, &j.PreemptionEpoch,
+		&j.DrainStartedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, false
@@ -323,6 +327,7 @@ func (s *PostgresStore) pgQueryJobs(ctx context.Context, query string, args ...a
 			&resourcesJSON, &j.WorkerID, &j.Priority, &j.QueueName,
 			&j.GangID, &j.GangSize, &j.GangIndex,
 			&checkpointJSON, &outputsJSON, &j.ReservationEpoch, &j.ReservedAt, &j.PreemptionEpoch,
+			&j.DrainStartedAt,
 		); err != nil {
 			panic(fmt.Sprintf("postgres: scan job row: %v", err))
 		}
@@ -600,7 +605,8 @@ func (s *PostgresStore) ClaimReservedJob(ctx context.Context, workerID string) (
 		          jobs.done_at, jobs.last_heartbeat, jobs.max_retries, jobs.attempts, jobs.depends_on,
 		          jobs.resources, jobs.worker_id, jobs.priority, jobs.queue_name,
 		          jobs.gang_id, jobs.gang_size, jobs.gang_index,
-		          jobs.checkpoint, jobs.outputs, jobs.reservation_epoch, jobs.reserved_at, jobs.preemption_epoch`,
+		          jobs.checkpoint, jobs.outputs, jobs.reservation_epoch, jobs.reserved_at, jobs.preemption_epoch,
+		          jobs.drain_started_at`,
 		workerID, time.Now(),
 	)
 	return pgScanJob(row)

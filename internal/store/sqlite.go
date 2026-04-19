@@ -84,7 +84,8 @@ func migrate(db *sql.DB) error {
 		outputs           TEXT,
 		reservation_epoch INTEGER DEFAULT 0,
 		reserved_at       DATETIME,
-		preemption_epoch  INTEGER DEFAULT 0
+		preemption_epoch  INTEGER DEFAULT 0,
+		drain_started_at  DATETIME
 	)`
 	if _, err := db.Exec(jobsSchema); err != nil {
 		return err
@@ -110,7 +111,8 @@ const jobColumns = `id, command, status, created_at, started_at, done_at,
 	last_heartbeat, max_retries, attempts, depends_on,
 	resources, worker_id, priority, queue_name,
 	gang_id, gang_size, gang_index,
-	checkpoint, outputs, reservation_epoch, reserved_at, preemption_epoch`
+	checkpoint, outputs, reservation_epoch, reserved_at, preemption_epoch,
+	drain_started_at`
 
 // JobStore implementation
 
@@ -241,6 +243,7 @@ func populateJobFromNullables(j *Job, status string,
 	checkpoint, outputs sql.NullString,
 	reservationEpoch sql.NullInt64, reservedAt sql.NullTime,
 	preemptionEpoch sql.NullInt64,
+	drainStartedAt sql.NullTime,
 ) {
 	j.Status = JobStatus(status)
 	if startedAt.Valid {
@@ -295,6 +298,9 @@ func populateJobFromNullables(j *Job, status string,
 	if preemptionEpoch.Valid {
 		j.PreemptionEpoch = int(preemptionEpoch.Int64)
 	}
+	if drainStartedAt.Valid {
+		j.DrainStartedAt = &drainStartedAt.Time
+	}
 }
 
 // scanJob scans a single database row into a Job.
@@ -308,7 +314,7 @@ func scanJob(row *sql.Row) (*Job, bool) {
 	var checkpoint, outputs sql.NullString
 	var priority, gangSize, gangIndex sql.NullInt64
 	var reservationEpoch, preemptionEpoch sql.NullInt64
-	var reservedAt sql.NullTime
+	var reservedAt, drainStartedAt sql.NullTime
 
 	err := row.Scan(
 		&j.ID, &j.Command, &status, &j.CreatedAt,
@@ -317,6 +323,7 @@ func scanJob(row *sql.Row) (*Job, bool) {
 		&resourcesJSON, &workerID, &priority, &queueName,
 		&gangID, &gangSize, &gangIndex,
 		&checkpoint, &outputs, &reservationEpoch, &reservedAt, &preemptionEpoch,
+		&drainStartedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false
@@ -328,7 +335,7 @@ func scanJob(row *sql.Row) (*Job, bool) {
 	populateJobFromNullables(&j, status, startedAt, doneAt, lastHeartbeat,
 		depsJSON, resourcesJSON, workerID, priority, queueName,
 		gangID, gangSize, gangIndex, checkpoint, outputs,
-		reservationEpoch, reservedAt, preemptionEpoch)
+		reservationEpoch, reservedAt, preemptionEpoch, drainStartedAt)
 
 	return &j, true
 }
@@ -351,7 +358,7 @@ func (s *SQLiteStore) queryJobs(ctx context.Context, query string, args ...any) 
 		var checkpoint, outputs sql.NullString
 		var priority, gangSize, gangIndex sql.NullInt64
 		var reservationEpoch, preemptionEpoch sql.NullInt64
-		var reservedAt sql.NullTime
+		var reservedAt, drainStartedAt sql.NullTime
 
 		if err := rows.Scan(
 			&j.ID, &j.Command, &status, &j.CreatedAt,
@@ -360,6 +367,7 @@ func (s *SQLiteStore) queryJobs(ctx context.Context, query string, args ...any) 
 			&resourcesJSON, &workerID, &priority, &queueName,
 			&gangID, &gangSize, &gangIndex,
 			&checkpoint, &outputs, &reservationEpoch, &reservedAt, &preemptionEpoch,
+			&drainStartedAt,
 		); err != nil {
 			panic(fmt.Sprintf("sqlite: scan job row: %v", err))
 		}
@@ -367,7 +375,7 @@ func (s *SQLiteStore) queryJobs(ctx context.Context, query string, args ...any) 
 		populateJobFromNullables(&j, status, startedAt, doneAt, lastHeartbeat,
 			depsJSON, resourcesJSON, workerID, priority, queueName,
 			gangID, gangSize, gangIndex, checkpoint, outputs,
-			reservationEpoch, reservedAt, preemptionEpoch)
+			reservationEpoch, reservedAt, preemptionEpoch, drainStartedAt)
 
 		jobs = append(jobs, &j)
 	}

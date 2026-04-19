@@ -98,6 +98,7 @@ type Job struct {
 	ReservationEpoch int               `json:"reservation_epoch,omitempty"`
 	ReservedAt       *time.Time        `json:"reserved_at,omitempty"`
 	PreemptionEpoch  int               `json:"preemption_epoch,omitempty"`
+	DrainStartedAt   *time.Time        `json:"drain_started_at,omitempty"`
 	Env              map[string]string `json:"env,omitempty"` // not persisted; populated in HTTP responses
 }
 
