@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/lrdinsu/workron/internal/metrics"
 	"github.com/lrdinsu/workron/internal/scheduler"
@@ -153,5 +154,68 @@ func TestSchedulerClient_SendHeartbeat(t *testing.T) {
 	job, _ := s.GetJob(ctx, id)
 	if job.LastHeartbeat == nil {
 		t.Error("expected last_heartbeat to be set after heartbeat")
+	}
+}
+
+func TestSchedulerClient_RegisterWorker(t *testing.T) {
+	ctx := context.Background()
+	client, s, cleanup := newTestScheduler(t)
+	defer cleanup()
+
+	w := store.Worker{
+		ID:        "test-worker",
+		ExecAddr:  "127.0.0.1:9000",
+		Resources: store.ResourceSpec{VRAMMB: 16000, MemoryMB: 32000},
+	}
+	if err := client.RegisterWorker(ctx, w); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, found := s.GetWorker(ctx, "test-worker")
+	if !found {
+		t.Fatal("worker was not registered in the store")
+	}
+	if got.ExecAddr != "127.0.0.1:9000" {
+		t.Errorf("exec_addr = %q, want 127.0.0.1:9000", got.ExecAddr)
+	}
+	if got.Resources.VRAMMB != 16000 {
+		t.Errorf("vram_mb = %d, want 16000", got.Resources.VRAMMB)
+	}
+	if got.Status != store.WorkerActive {
+		t.Errorf("status = %q, want active", got.Status)
+	}
+}
+
+func TestSchedulerClient_SendWorkerHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	client, s, cleanup := newTestScheduler(t)
+	defer cleanup()
+
+	// Register first, then backdate heartbeat to a known past time.
+	if err := client.RegisterWorker(ctx, store.Worker{ID: "test-worker", ExecAddr: "h:1"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	pastTime := time.Now().Add(-1 * time.Hour)
+	s.SetWorkerHeartbeat("test-worker", pastTime)
+
+	if err := client.SendWorkerHeartbeat(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, _ := s.GetWorker(ctx, "test-worker")
+	if !got.LastHeartbeat.After(pastTime) {
+		t.Errorf("last_heartbeat was not refreshed: got %v, want after %v", got.LastHeartbeat, pastTime)
+	}
+}
+
+func TestSchedulerClient_SendWorkerHeartbeat_UnknownWorker(t *testing.T) {
+	ctx := context.Background()
+	client, _, cleanup := newTestScheduler(t)
+	defer cleanup()
+
+	// Never registered → scheduler returns 404.
+	err := client.SendWorkerHeartbeat(ctx)
+	if err == nil {
+		t.Fatal("expected error for unregistered worker, got nil")
 	}
 }

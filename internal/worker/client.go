@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -166,4 +167,64 @@ func (c *SchedulerClient) SendHeartbeat(ctx context.Context, id string) (string,
 	}
 
 	return "", nil
+}
+
+// RegisterWorker announces this worker to the scheduler. Called once on startup
+// before the worker begins polling for jobs. Without registration the worker
+// is invisible to gang admission (which only considers registered, active workers),
+// though it can still claim regular pending jobs.
+func (c *SchedulerClient) RegisterWorker(ctx context.Context, w store.Worker) error {
+	body, err := json.Marshal(w)
+	if err != nil {
+		return fmt.Errorf("marshal worker: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/workers/register", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("register worker %s: %w", w.ID, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("register worker %s: %w", w.ID, err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Error("failed to close response body", "error", closeErr)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("register worker %s: unexpected status %d", w.ID, resp.StatusCode)
+	}
+	return nil
+}
+
+// SendWorkerHeartbeat refreshes the worker's last_heartbeat on the scheduler.
+// Must be called periodically (more often than the scheduler's workerStaleTimeout of 60s);
+// otherwise the reaper marks the worker offline and gang admission stops considering it.
+func (c *SchedulerClient) SendWorkerHeartbeat(ctx context.Context) error {
+	if c.workerID == "" {
+		return fmt.Errorf("worker heartbeat: no worker_id set on client")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/workers/"+c.workerID+"/heartbeat", nil)
+	if err != nil {
+		return fmt.Errorf("worker heartbeat %s: %w", c.workerID, err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("worker heartbeat %s: %w", c.workerID, err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Error("failed to close response body", "error", closeErr)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("worker heartbeat %s: unexpected status %d", c.workerID, resp.StatusCode)
+	}
+	return nil
 }
