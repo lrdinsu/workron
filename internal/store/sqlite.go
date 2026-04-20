@@ -668,3 +668,226 @@ func (s *SQLiteStore) SetReservedAt(id string, t time.Time) {
 		panic(fmt.Sprintf("sqlite: set reserved_at: %v", err))
 	}
 }
+
+// SetDrainStartedAt sets a job's drain_started_at to a specific time.
+// Used for testing force-drain timeout behavior.
+func (s *SQLiteStore) SetDrainStartedAt(id string, t time.Time) {
+	_, err := s.db.Exec(`UPDATE jobs SET drain_started_at = ? WHERE id = ?`, t, id)
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: set drain_started_at: %v", err))
+	}
+}
+
+// --- Preemption ---
+
+// PreemptGang enters the gang into coordinated drain if any task is running.
+// See GangStore.PreemptGang for the full contract.
+func (s *SQLiteStore) PreemptGang(ctx context.Context, gangID string, triggerJobID string) (PreemptGangResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PreemptGangResult{}, fmt.Errorf("sqlite: begin preempt tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Is any task in this gang currently running? Also find max PreemptionEpoch.
+	var running int
+	var maxEpoch int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM jobs WHERE gang_id = ? AND status = 'running'`, gangID,
+	).Scan(&running); err != nil {
+		return PreemptGangResult{}, fmt.Errorf("sqlite: count running: %w", err)
+	}
+	if running == 0 {
+		return PreemptGangResult{Entered: false}, nil
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(preemption_epoch), 0) FROM jobs WHERE gang_id = ?`, gangID,
+	).Scan(&maxEpoch); err != nil {
+		return PreemptGangResult{}, fmt.Errorf("sqlite: max epoch: %w", err)
+	}
+
+	newEpoch := maxEpoch + 1
+	now := time.Now()
+
+	// running -> preempting for non-trigger, with Attempts refund (max guard)
+	// Using CASE to keep it one statement.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE jobs
+		 SET status = 'preempting',
+		     preemption_epoch = ?,
+		     drain_started_at = ?,
+		     attempts = CASE
+		         WHEN id = ? THEN attempts
+		         WHEN attempts > 0 THEN attempts - 1
+		         ELSE 0
+		     END
+		 WHERE gang_id = ? AND status = 'running'`,
+		newEpoch, now, triggerJobID, gangID,
+	)
+	if err != nil {
+		return PreemptGangResult{}, fmt.Errorf("sqlite: preempt running: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+
+	// reserved -> blocked (clear worker_id, reserved_at)
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE jobs SET status = 'blocked', worker_id = '', reserved_at = NULL
+		 WHERE gang_id = ? AND status = 'reserved'`, gangID,
+	); err != nil {
+		return PreemptGangResult{}, fmt.Errorf("sqlite: preempt reserved: %w", err)
+	}
+
+	// pending-> blocked
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE jobs SET status = 'blocked' WHERE gang_id = ? AND status = 'pending'`, gangID,
+	); err != nil {
+		return PreemptGangResult{}, fmt.Errorf("sqlite: preempt pending: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return PreemptGangResult{}, fmt.Errorf("sqlite: commit preempt: %w", err)
+	}
+
+	return PreemptGangResult{
+		Entered:      true,
+		Epoch:        newEpoch,
+		Transitioned: int(affected),
+	}, nil
+}
+
+// MarkPreempted is worker acknowledgement: preempting -> preempted.
+// See GangStore.MarkPreempted for the full contract.
+func (s *SQLiteStore) MarkPreempted(ctx context.Context, jobID string, epoch int) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET status = 'preempted'
+		 WHERE id = ? AND status = 'preempting' AND preemption_epoch = ?`,
+		jobID, epoch,
+	)
+	if err != nil {
+		return fmt.Errorf("sqlite: mark preempted: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return fmt.Errorf("job %q: not preempting or epoch %d mismatch", jobID, epoch)
+	}
+	return nil
+}
+
+// ForceDrainPreempting is reaper timeout: preempting → preempted, no epoch check.
+// See GangStore.ForceDrainPreempting for the full contract.
+func (s *SQLiteStore) ForceDrainPreempting(ctx context.Context, jobID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET status = 'preempted' WHERE id = ? AND status = 'preempting'`, jobID,
+	)
+	if err != nil {
+		return fmt.Errorf("sqlite: force drain: %w", err)
+	}
+	// Idempotent: zero rows affected is fine (already preempted or elsewhere).
+	return nil
+}
+
+// CompletePreemption normalizes a drained gang to blocked or failed.
+// See GangStore.CompletePreemption for the full contract.
+func (s *SQLiteStore) CompletePreemption(ctx context.Context, gangID string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("sqlite: begin complete tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Any task still running or preempting? If so, not drained yet.
+	var inFlight int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM jobs WHERE gang_id = ? AND status IN ('running', 'preempting')`, gangID,
+	).Scan(&inFlight); err != nil {
+		return false, fmt.Errorf("sqlite: count in-flight: %w", err)
+	}
+	if inFlight > 0 {
+		return false, nil
+	}
+
+	// Exhausted retries OR already-terminal sibling -> gang fails.
+	var exhausted, terminal int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM jobs WHERE gang_id = ? AND attempts >= max_retries`, gangID,
+	).Scan(&exhausted); err != nil {
+		return false, fmt.Errorf("sqlite: count exhausted: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM jobs WHERE gang_id = ? AND status IN ('done', 'failed')`, gangID,
+	).Scan(&terminal); err != nil {
+		return false, fmt.Errorf("sqlite: count terminal: %w", err)
+	}
+
+	// Check gang exists.
+	var total int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM jobs WHERE gang_id = ?`, gangID,
+	).Scan(&total); err != nil {
+		return false, fmt.Errorf("sqlite: count gang: %w", err)
+	}
+	if total == 0 {
+		return false, fmt.Errorf("gang %q: no tasks found", gangID)
+	}
+
+	target := string(StatusBlocked)
+	var doneAt *time.Time
+	if exhausted > 0 || terminal > 0 {
+		target = string(StatusFailed)
+		t := time.Now()
+		doneAt = &t
+	}
+
+	// Transition preempted/blocked tasks to target; leave done/failed untouched.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE jobs
+		 SET status = ?,
+		     worker_id = '',
+		     reserved_at = NULL,
+		     drain_started_at = NULL,
+		     done_at = CASE WHEN ? = 'failed' THEN ? ELSE done_at END
+		 WHERE gang_id = ? AND status IN ('preempted', 'blocked')`,
+		target, target, doneAt, gangID,
+	); err != nil {
+		return false, fmt.Errorf("sqlite: complete preemption: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("sqlite: commit complete: %w", err)
+	}
+	return true, nil
+}
+
+// SaveCheckpoint stores raw bytes on the job, epoch-guarded.
+// See GangStore.SaveCheckpoint for the full contract.
+func (s *SQLiteStore) SaveCheckpoint(ctx context.Context, jobID string, epoch int, data json.RawMessage) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET checkpoint = ?
+		 WHERE id = ? AND status = 'preempting' AND preemption_epoch = ?`,
+		string(data), jobID, epoch,
+	)
+	if err != nil {
+		return fmt.Errorf("sqlite: save checkpoint: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return fmt.Errorf("job %q: not preempting or epoch %d mismatch", jobID, epoch)
+	}
+	return nil
+}
+
+// GetCheckpoint returns the stored checkpoint bytes for a job, if any.
+func (s *SQLiteStore) GetCheckpoint(ctx context.Context, jobID string) (json.RawMessage, bool) {
+	var checkpoint sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT checkpoint FROM jobs WHERE id = ?`, jobID).Scan(&checkpoint)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false
+	}
+	if err != nil {
+		panic(fmt.Sprintf("sqlite: get checkpoint: %v", err))
+	}
+	if !checkpoint.Valid || checkpoint.String == "" {
+		return nil, false
+	}
+	return json.RawMessage(checkpoint.String), true
+}
