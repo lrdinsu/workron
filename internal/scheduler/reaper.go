@@ -13,6 +13,11 @@ const (
 	reapInterval       = 10 * time.Second
 	heartbeatTimeout   = 30 * time.Second
 	workerStaleTimeout = 60 * time.Second
+	// preemptTimeout bounds how long a task may sit in preempting
+	// waiting for its worker's /preempted acknowledgement before the
+	// reaper force-drains it. Roughly the SIGTERM grace window (15s)
+	// plus slack (30s) for network and checkpoint upload.
+	preemptTimeout = 45 * time.Second
 )
 
 // StartReaper runs a background goroutine that detects dead workers.
@@ -43,6 +48,7 @@ func StartReaper(ctx context.Context, s store.JobStore, logger *slog.Logger, m *
 func runReaperTick(ctx context.Context, s store.JobStore, logger *slog.Logger, m *metrics.Metrics) {
 	doReap := func(ctx context.Context) {
 		reap(ctx, s, logger, m)
+		completeDrainedPreemptions(ctx, s, logger)
 		s.UnblockReady(ctx)
 
 		// Mark workers with stale heartbeats as offline.
@@ -135,5 +141,128 @@ func reap(ctx context.Context, s store.JobStore, logger *slog.Logger, m *metrics
 				logger.Error("reaper failed to propagate gang failure", "gang_id", job.GangID, "error", err)
 			}
 		}
+	}
+}
+
+// completeDrainedPreemptions finishes any gang drains that are ready.
+// Two passes, ordered:
+//
+//  1. Force-timeout: tasks stuck in preempting past preemptTimeout are
+//     moved to preempted as if the worker had acked. This covers dead
+//     or unreachable workers that will never send /preempted, and it
+//     must run before the completion pass — otherwise a single stuck
+//     task would block its gang's completion indefinitely.
+//  2. Completion: for each gang that has at least one task in
+//     preempting/preempted and no task still in running/preempting,
+//     CompletePreemption is called. The store decides whether the gang
+//     goes to blocked (re-admissible) or failed (retries exhausted or
+//     partial completion encountered).
+//
+// No-op when the backing store does not implement GangStore.
+func completeDrainedPreemptions(ctx context.Context, s store.JobStore, logger *slog.Logger) {
+	gs, ok := s.(store.GangStore)
+	if !ok {
+		return
+	}
+
+	now := time.Now()
+
+	// Pass 1: force-timeout stale preempting tasks.
+	for _, job := range s.ListJobs(ctx) {
+		if job.Status != store.StatusPreempting {
+			continue
+		}
+		if job.DrainStartedAt == nil {
+			// Defensive: a preempting row without a stamp shouldn't happen via
+			// PreemptGang, but skip to avoid an indeterminate timeout calculation.
+			continue
+		}
+		age := now.Sub(*job.DrainStartedAt)
+		if age <= preemptTimeout {
+			continue
+		}
+		if err := gs.ForceDrainPreempting(ctx, job.ID); err != nil {
+			logger.Error("force drain failed",
+				"job_id", job.ID,
+				"gang_id", job.GangID,
+				"preemption_epoch", job.PreemptionEpoch,
+				"error", err,
+			)
+			continue
+		}
+		logger.Warn("force-drained stuck preempting task",
+			"job_id", job.ID,
+			"gang_id", job.GangID,
+			"preemption_epoch", job.PreemptionEpoch,
+			"drain_age", age.Round(time.Second),
+		)
+	}
+
+	// Pass 2: complete drained gangs.
+	// Re-list because pass 1 may have moved tasks from preempting to
+	// preempted, changing completion eligibility.
+	type gangState struct {
+		hasDrained  bool // any task preempting or preempted
+		hasInFlight bool // any task running or preempting
+		epoch       int  // representative drain-round epoch for logging
+	}
+	gangs := make(map[string]*gangState)
+	for _, job := range s.ListJobs(ctx) {
+		if job.GangID == "" {
+			continue
+		}
+		st, ok := gangs[job.GangID]
+		if !ok {
+			st = &gangState{}
+			gangs[job.GangID] = st
+		}
+		switch job.Status {
+		case store.StatusPreempting:
+			st.hasInFlight = true
+			st.hasDrained = true
+			if job.PreemptionEpoch > st.epoch {
+				st.epoch = job.PreemptionEpoch
+			}
+		case store.StatusPreempted:
+			st.hasDrained = true
+			if job.PreemptionEpoch > st.epoch {
+				st.epoch = job.PreemptionEpoch
+			}
+		case store.StatusRunning:
+			st.hasInFlight = true
+		}
+	}
+
+	for gangID, st := range gangs {
+		if !st.hasDrained || st.hasInFlight {
+			continue
+		}
+		completed, err := gs.CompletePreemption(ctx, gangID)
+		if err != nil {
+			logger.Error("complete preemption failed",
+				"gang_id", gangID,
+				"preemption_epoch", st.epoch,
+				"error", err,
+			)
+			continue
+		}
+		if !completed {
+			// Another reaper instance or a concurrent writer raced;
+			// try again next tick.
+			continue
+		}
+		// Re-read the gang to report the verdict.
+		outcome := "blocked"
+		for _, t := range gs.ListGangTasks(ctx, gangID) {
+			if t.Status == store.StatusFailed {
+				outcome = "failed"
+				break
+			}
+		}
+		logger.Info("gang drain completed",
+			"gang_id", gangID,
+			"preemption_epoch", st.epoch,
+			"outcome", outcome,
+		)
 	}
 }
