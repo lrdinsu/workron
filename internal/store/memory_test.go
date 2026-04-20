@@ -224,6 +224,42 @@ func TestMemory_FailGangPermanent(t *testing.T) {
 	testFailGangPermanent(t, newTestMemoryGangJobStore)
 }
 
+func TestMemory_PreemptGangNoRunning(t *testing.T) {
+	testPreemptGangNoRunning(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_PreemptGangHomogeneousRunning(t *testing.T) {
+	testPreemptGangHomogeneousRunning(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_PreemptGangMixedStates(t *testing.T) {
+	testPreemptGangMixedStates(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_MarkPreemptedEpochMismatch(t *testing.T) {
+	testMarkPreemptedEpochMismatch(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_ForceDrainPreempting(t *testing.T) {
+	testForceDrainPreempting(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_CompletePreemptionBlocked(t *testing.T) {
+	testCompletePreemptionBlocked(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_PreemptionRetryConvergence(t *testing.T) {
+	testPreemptionRetryConvergence(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_CompletePreemptionPartialCompletion(t *testing.T) {
+	testCompletePreemptionPartialCompletion(t, newTestMemoryGangJobStore)
+}
+
+func TestMemory_SaveCheckpointEpochGuard(t *testing.T) {
+	testSaveCheckpointEpochGuard(t, newTestMemoryGangJobStore)
+}
+
 func TestMemoryStore_AddAndClaimJob(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()

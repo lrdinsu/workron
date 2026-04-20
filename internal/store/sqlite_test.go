@@ -302,3 +302,39 @@ func TestSQLite_FailGangRetry(t *testing.T) {
 func TestSQLite_FailGangPermanent(t *testing.T) {
 	testFailGangPermanent(t, newTestSQLiteGangJobStore)
 }
+
+func TestSQLite_PreemptGangNoRunning(t *testing.T) {
+	testPreemptGangNoRunning(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_PreemptGangHomogeneousRunning(t *testing.T) {
+	testPreemptGangHomogeneousRunning(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_PreemptGangMixedStates(t *testing.T) {
+	testPreemptGangMixedStates(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_MarkPreemptedEpochMismatch(t *testing.T) {
+	testMarkPreemptedEpochMismatch(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_ForceDrainPreempting(t *testing.T) {
+	testForceDrainPreempting(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_CompletePreemptionBlocked(t *testing.T) {
+	testCompletePreemptionBlocked(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_PreemptionRetryConvergence(t *testing.T) {
+	testPreemptionRetryConvergence(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_CompletePreemptionPartialCompletion(t *testing.T) {
+	testCompletePreemptionPartialCompletion(t, newTestSQLiteGangJobStore)
+}
+
+func TestSQLite_SaveCheckpointEpochGuard(t *testing.T) {
+	testSaveCheckpointEpochGuard(t, newTestSQLiteGangJobStore)
+}
