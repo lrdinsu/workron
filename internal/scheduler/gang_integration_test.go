@@ -127,6 +127,13 @@ func (e *gangTestEnv) runAdmission() {
 	RunGangAdmissionOnce(ctx, e.store, e.store, e.store, slog.Default())
 }
 
+// runCompleteDrainedPreemptions runs one pass of the reaper's drain-completion
+// logic: force-timeout + gang completion.
+func (e *gangTestEnv) runCompleteDrainedPreemptions() {
+	e.t.Helper()
+	completeDrainedPreemptions(context.Background(), e.store, slog.Default())
+}
+
 // --- Integration Tests ---
 
 func TestGangIntegration_FullLifecycle(t *testing.T) {
@@ -422,5 +429,109 @@ func TestGangIntegration_NonGangJobsUnaffected(t *testing.T) {
 	job2 := e.claimJob("")
 	if job2 != nil {
 		t.Errorf("should not claim gang task via regular ClaimJob, got %s with status %s", job2.ID, job2.Status)
+	}
+}
+
+// TestGangIntegration_DrainCompletesToBlocked exercises the full preemption round-trip:
+// trigger drain -> workers ack -> reaper completes -> gang is re-admissible.
+func TestGangIntegration_DrainCompletesToBlocked(t *testing.T) {
+	e := newGangTestEnv(t)
+	ctx := context.Background()
+
+	// Register 3 workers, submit 3-task gang, reserve + claim all.
+	for i := 0; i < 3; i++ {
+		wid := "w" + string(rune('0'+i))
+		e.registerWorker(wid, "host:800"+string(rune('0'+i)), store.ResourceSpec{VRAMMB: 16000})
+	}
+	gangID, _ := e.submitGang("train", 3, &store.ResourceSpec{VRAMMB: 8000})
+	e.runAdmission()
+	tasks := e.getGang(gangID)
+	for _, task := range tasks {
+		e.claimJob(task.WorkerID)
+	}
+
+	// Trigger drain on task 0, all three go to preempting.
+	e.reportFail(tasks[0].ID)
+	preempting := e.getGang(gangID)
+	epoch := preempting[0].PreemptionEpoch
+
+	// Simulate all workers acking their preempted exit.
+	for _, task := range preempting {
+		if err := e.store.MarkPreempted(ctx, task.ID, epoch); err != nil {
+			t.Fatalf("MarkPreempted(%s): %v", task.ID, err)
+		}
+	}
+
+	// A first reaper pass while drain isn't complete should be a no-op;
+	// but after acks, the first pass should complete the gang to blocked.
+	e.runCompleteDrainedPreemptions()
+
+	for _, task := range tasks {
+		job, _ := e.store.GetJob(ctx, task.ID)
+		if job.Status != store.StatusBlocked {
+			t.Errorf("task %s status = %q, want blocked after drain completion", task.ID, job.Status)
+		}
+		if job.DrainStartedAt != nil {
+			t.Errorf("task %s drain_started_at should be cleared", task.ID)
+		}
+		if job.WorkerID != "" {
+			t.Errorf("task %s worker_id = %q, want cleared", task.ID, job.WorkerID)
+		}
+	}
+
+	// Admission should re-reserve the gang on the next tick.
+	e.runAdmission()
+	for _, task := range e.getGang(gangID) {
+		if task.Status != store.StatusReserved {
+			t.Errorf("task %s status = %q, want reserved after re-admission", task.ID, task.Status)
+		}
+	}
+}
+
+// TestGangIntegration_DrainForceTimeout exercises the reaper's force-timeout
+// path: a gang enters drain, no worker ever acks, and after preemptTimeout
+// the reaper force-drains the stuck tasks so the gang can complete.
+func TestGangIntegration_DrainForceTimeout(t *testing.T) {
+	e := newGangTestEnv(t)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		wid := "w" + string(rune('0'+i))
+		e.registerWorker(wid, "host:800"+string(rune('0'+i)), store.ResourceSpec{VRAMMB: 16000})
+	}
+	gangID, _ := e.submitGang("train", 3, &store.ResourceSpec{VRAMMB: 8000})
+	e.runAdmission()
+	tasks := e.getGang(gangID)
+	for _, task := range tasks {
+		e.claimJob(task.WorkerID)
+	}
+
+	// Drain starts; no worker acks.
+	e.reportFail(tasks[0].ID)
+
+	// First pass (within grace): nothing should change.
+	e.runCompleteDrainedPreemptions()
+	for _, task := range tasks {
+		job, _ := e.store.GetJob(ctx, task.ID)
+		if job.Status != store.StatusPreempting {
+			t.Errorf("task %s status = %q, want still preempting inside grace window", task.ID, job.Status)
+		}
+	}
+
+	// Backdate DrainStartedAt past the timeout to simulate a stuck drain.
+	stale := time.Now().Add(-2 * time.Minute)
+	for _, task := range tasks {
+		e.store.SetDrainStartedAt(task.ID, stale)
+	}
+
+	// Two reaper passes: first force-drains preempting -> preempted
+	// and then completes the gang on pass 2 in the same call.
+	e.runCompleteDrainedPreemptions()
+
+	for _, task := range tasks {
+		job, _ := e.store.GetJob(ctx, task.ID)
+		if job.Status != store.StatusBlocked {
+			t.Errorf("task %s status = %q, want blocked after force-drain timeout", task.ID, job.Status)
+		}
 	}
 }
