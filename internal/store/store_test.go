@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -1231,5 +1234,406 @@ func testFailGangPermanent(t *testing.T, factory GangJobStoreFactory) {
 		if job.Status != StatusFailed {
 			t.Errorf("task %s status = %q, want failed", id, job.Status)
 		}
+	}
+}
+
+// --- Preemption helpers ---
+
+// reserveAndClaimGang reserves all tasks and claims them into running for each
+// assigned worker. Returns the assignments it used.
+func reserveAndClaimGang(t *testing.T, s gangJobStore, gangID string, taskIDs []string) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	assignments := make(map[string]string, len(taskIDs))
+	for i, id := range taskIDs {
+		assignments[id] = fmt.Sprintf("worker-%d", i)
+	}
+	if err := s.ReserveGang(ctx, gangID, assignments, 1); err != nil {
+		t.Fatalf("ReserveGang: %v", err)
+	}
+	for _, w := range assignments {
+		if _, ok := s.ClaimReservedJob(ctx, w); !ok {
+			t.Fatalf("ClaimReservedJob(%s) not found", w)
+		}
+	}
+	return assignments
+}
+
+func testPreemptGangNoRunning(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+	gangID, _ := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 3})
+
+	res, err := s.PreemptGang(ctx, gangID, "nonexistent-trigger")
+	if err != nil {
+		t.Fatalf("PreemptGang: %v", err)
+	}
+	if res.Entered {
+		t.Errorf("Entered = true, want false when no task is running")
+	}
+	if res.Epoch != 0 || res.Transitioned != 0 {
+		t.Errorf("result should be zero-valued when not entered, got %+v", res)
+	}
+}
+
+func testPreemptGangHomogeneousRunning(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 3})
+	reserveAndClaimGang(t, s, gangID, taskIDs)
+
+	trigger := taskIDs[0]
+	res, err := s.PreemptGang(ctx, gangID, trigger)
+	if err != nil {
+		t.Fatalf("PreemptGang: %v", err)
+	}
+	if !res.Entered {
+		t.Fatalf("Entered = false, want true")
+	}
+	if res.Epoch != 1 {
+		t.Errorf("Epoch = %d, want 1", res.Epoch)
+	}
+	if res.Transitioned != 3 {
+		t.Errorf("Transitioned = %d, want 3", res.Transitioned)
+	}
+
+	for _, id := range taskIDs {
+		job, _ := s.GetJob(ctx, id)
+		if job.Status != StatusPreempting {
+			t.Errorf("task %s status = %q, want preempting", id, job.Status)
+		}
+		if job.PreemptionEpoch != 1 {
+			t.Errorf("task %s preemption_epoch = %d, want 1", id, job.PreemptionEpoch)
+		}
+		if job.DrainStartedAt == nil {
+			t.Errorf("task %s drain_started_at = nil, want set", id)
+		}
+	}
+
+	// Retry-budget refund: trigger keeps its claim-time attempts=1 (real failure),
+	// siblings are refunded back to 0 (not counted against MaxRetries).
+	triggerJob, _ := s.GetJob(ctx, trigger)
+	if triggerJob.Attempts != 1 {
+		t.Errorf("trigger attempts = %d, want 1 (not refunded)", triggerJob.Attempts)
+	}
+	for _, id := range taskIDs[1:] {
+		job, _ := s.GetJob(ctx, id)
+		if job.Attempts != 0 {
+			t.Errorf("sibling %s attempts = %d, want 0 (refunded)", id, job.Attempts)
+		}
+	}
+}
+
+func testPreemptGangMixedStates(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 3})
+
+	// Reserve all 3; claim only 2 into running. Third stays reserved.
+	assignments := map[string]string{
+		taskIDs[0]: "worker-0",
+		taskIDs[1]: "worker-1",
+		taskIDs[2]: "worker-2",
+	}
+	_ = s.ReserveGang(ctx, gangID, assignments, 1)
+	_, _ = s.ClaimReservedJob(ctx, "worker-0")
+	_, _ = s.ClaimReservedJob(ctx, "worker-1")
+
+	res, err := s.PreemptGang(ctx, gangID, taskIDs[0])
+	if err != nil {
+		t.Fatalf("PreemptGang: %v", err)
+	}
+	if !res.Entered {
+		t.Fatalf("Entered = false, want true")
+	}
+	if res.Transitioned != 2 {
+		t.Errorf("Transitioned = %d, want 2", res.Transitioned)
+	}
+
+	// Running ones -> preempting
+	for _, id := range taskIDs[:2] {
+		job, _ := s.GetJob(ctx, id)
+		if job.Status != StatusPreempting {
+			t.Errorf("task %s status = %q, want preempting", id, job.Status)
+		}
+	}
+	// Reserved one → blocked: a reserved task has no running process to
+	// signal, so it skips preempting and is parked directly in blocked.
+	reservedTask, _ := s.GetJob(ctx, taskIDs[2])
+	if reservedTask.Status != StatusBlocked {
+		t.Errorf("reserved task %s status = %q, want blocked", taskIDs[2], reservedTask.Status)
+	}
+	if reservedTask.WorkerID != "" {
+		t.Errorf("reserved task worker_id = %q, want cleared", reservedTask.WorkerID)
+	}
+	if reservedTask.ReservedAt != nil {
+		t.Errorf("reserved task reserved_at should be nil after blocked transition")
+	}
+}
+
+func testMarkPreemptedEpochMismatch(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 2})
+	reserveAndClaimGang(t, s, gangID, taskIDs)
+	_, _ = s.PreemptGang(ctx, gangID, taskIDs[0])
+
+	// Wrong epoch.
+	if err := s.MarkPreempted(ctx, taskIDs[0], 999); err == nil {
+		t.Error("MarkPreempted: expected error on epoch mismatch, got nil")
+	}
+	// Correct epoch succeeds.
+	if err := s.MarkPreempted(ctx, taskIDs[0], 1); err != nil {
+		t.Errorf("MarkPreempted(correct epoch): %v", err)
+	}
+	// Wrong status (already preempted).
+	if err := s.MarkPreempted(ctx, taskIDs[0], 1); err == nil {
+		t.Error("MarkPreempted: expected error on non-preempting status, got nil")
+	}
+}
+
+func testForceDrainPreempting(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 2})
+	reserveAndClaimGang(t, s, gangID, taskIDs)
+	_, _ = s.PreemptGang(ctx, gangID, taskIDs[0])
+
+	// Force drain (bypasses epoch).
+	if err := s.ForceDrainPreempting(ctx, taskIDs[0]); err != nil {
+		t.Fatalf("ForceDrainPreempting: %v", err)
+	}
+	job, _ := s.GetJob(ctx, taskIDs[0])
+	if job.Status != StatusPreempted {
+		t.Errorf("status = %q, want preempted", job.Status)
+	}
+	// Idempotent: second call on already-preempted is a no-op, not an error.
+	if err := s.ForceDrainPreempting(ctx, taskIDs[0]); err != nil {
+		t.Errorf("ForceDrainPreempting (idempotent): %v", err)
+	}
+}
+
+func testCompletePreemptionBlocked(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 3})
+	reserveAndClaimGang(t, s, gangID, taskIDs)
+	_, _ = s.PreemptGang(ctx, gangID, taskIDs[0])
+
+	// Drain not yet complete: all tasks in preempting.
+	completed, _ := s.CompletePreemption(ctx, gangID)
+	if completed {
+		t.Errorf("CompletePreemption returned true while tasks are still preempting")
+	}
+
+	// Ack all tasks.
+	for _, id := range taskIDs {
+		if err := s.MarkPreempted(ctx, id, 1); err != nil {
+			t.Fatalf("MarkPreempted(%s): %v", id, err)
+		}
+	}
+
+	completed, err := s.CompletePreemption(ctx, gangID)
+	if err != nil {
+		t.Fatalf("CompletePreemption: %v", err)
+	}
+	if !completed {
+		t.Fatalf("CompletePreemption returned false after full drain")
+	}
+
+	// All tasks -> blocked (MaxRetries=3 default, trigger has attempts=1, siblings=0).
+	for _, id := range taskIDs {
+		job, _ := s.GetJob(ctx, id)
+		if job.Status != StatusBlocked {
+			t.Errorf("task %s status = %q, want blocked", id, job.Status)
+		}
+		if job.WorkerID != "" {
+			t.Errorf("task %s worker_id = %q, want cleared", id, job.WorkerID)
+		}
+		if job.DrainStartedAt != nil {
+			t.Errorf("task %s drain_started_at should be cleared", id)
+		}
+	}
+}
+
+// testPreemptionRetryConvergence drives a gang through 3 rounds of
+// same-trigger failure. Because PreemptGang refunds siblings but keeps the
+// trigger's +1, only the trigger's Attempts grows across rounds. At
+// round 3 the trigger hits MaxRetries and option B in CompletePreemption
+// routes the gang to failed. Guards against the infinite-retry bug.
+func testPreemptionRetryConvergence(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 3})
+	trigger := taskIDs[0]
+
+	for round := 1; round <= 3; round++ {
+		// Reserve and claim all 3.
+		assignments := map[string]string{
+			taskIDs[0]: "worker-a",
+			taskIDs[1]: "worker-b",
+			taskIDs[2]: "worker-c",
+		}
+		if err := s.ReserveGang(ctx, gangID, assignments, round); err != nil {
+			t.Fatalf("round %d ReserveGang: %v", round, err)
+		}
+		for _, w := range []string{"worker-a", "worker-b", "worker-c"} {
+			if _, ok := s.ClaimReservedJob(ctx, w); !ok {
+				t.Fatalf("round %d ClaimReservedJob(%s) not found", round, w)
+			}
+		}
+
+		// Fail via preempt.
+		res, err := s.PreemptGang(ctx, gangID, trigger)
+		if err != nil {
+			t.Fatalf("round %d PreemptGang: %v", round, err)
+		}
+		if !res.Entered {
+			t.Fatalf("round %d PreemptGang.Entered = false", round)
+		}
+		for _, id := range taskIDs {
+			if err := s.MarkPreempted(ctx, id, res.Epoch); err != nil {
+				t.Fatalf("round %d MarkPreempted(%s): %v", round, id, err)
+			}
+		}
+		if _, err := s.CompletePreemption(ctx, gangID); err != nil {
+			t.Fatalf("round %d CompletePreemption: %v", round, err)
+		}
+
+		triggerJob, _ := s.GetJob(ctx, trigger)
+		if round < 3 {
+			// Gang still has retry budget: all blocked, trigger attempts grows each round.
+			if triggerJob.Status != StatusBlocked {
+				t.Errorf("round %d trigger status = %q, want blocked", round, triggerJob.Status)
+			}
+			if triggerJob.Attempts != round {
+				t.Errorf("round %d trigger attempts = %d, want %d", round, triggerJob.Attempts, round)
+			}
+			// Siblings' attempts refunded to 0 every round.
+			for _, id := range taskIDs[1:] {
+				job, _ := s.GetJob(ctx, id)
+				if job.Attempts != 0 {
+					t.Errorf("round %d sibling %s attempts = %d, want 0", round, id, job.Attempts)
+				}
+			}
+		} else {
+			// Round 3: trigger has attempts=3=MaxRetries → option B routes gang to failed.
+			for _, id := range taskIDs {
+				job, _ := s.GetJob(ctx, id)
+				if job.Status != StatusFailed {
+					t.Errorf("round 3 task %s status = %q, want failed (gang exhausted)", id, job.Status)
+				}
+			}
+		}
+	}
+}
+
+// testCompletePreemptionPartialCompletion covers the edge case where one
+// task of a gang is already done (or failed) when a peer triggers drain.
+// Restart-all semantics cannot cleanly re-admit such a gang, so
+// CompletePreemption must route the whole gang to failed — not blocked —
+// even though retries would otherwise remain. The already-done task's
+// status is preserved on the row.
+func testCompletePreemptionPartialCompletion(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 3})
+	reserveAndClaimGang(t, s, gangID, taskIDs)
+
+	// Task 0 finishes successfully while 1 and 2 are still running.
+	s.UpdateJobStatus(ctx, taskIDs[0], StatusDone)
+
+	// Task 1 fails — gang drain should begin for the remaining running tasks.
+	res, err := s.PreemptGang(ctx, gangID, taskIDs[1])
+	if err != nil {
+		t.Fatalf("PreemptGang: %v", err)
+	}
+	if !res.Entered {
+		t.Fatalf("Entered = false, want true (1 and 2 are running)")
+	}
+	// Only 1 and 2 should be preempting; 0 is done and stays done.
+	if res.Transitioned != 2 {
+		t.Errorf("Transitioned = %d, want 2", res.Transitioned)
+	}
+
+	// Ack the two drained tasks.
+	for _, id := range taskIDs[1:] {
+		if err := s.MarkPreempted(ctx, id, res.Epoch); err != nil {
+			t.Fatalf("MarkPreempted(%s): %v", id, err)
+		}
+	}
+
+	completed, err := s.CompletePreemption(ctx, gangID)
+	if err != nil {
+		t.Fatalf("CompletePreemption: %v", err)
+	}
+	if !completed {
+		t.Fatalf("CompletePreemption returned false after full drain")
+	}
+
+	// Partial-completion rule: gang fails even though retries remain.
+	// Task 0 stays done; tasks 1 and 2 become failed.
+	job0, _ := s.GetJob(ctx, taskIDs[0])
+	if job0.Status != StatusDone {
+		t.Errorf("task 0 status = %q, want done (preserved)", job0.Status)
+	}
+	for _, id := range taskIDs[1:] {
+		job, _ := s.GetJob(ctx, id)
+		if job.Status != StatusFailed {
+			t.Errorf("task %s status = %q, want failed (partial completion)", id, job.Status)
+		}
+	}
+}
+
+func testSaveCheckpointEpochGuard(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+	gangID, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 2})
+	reserveAndClaimGang(t, s, gangID, taskIDs)
+
+	// Running status: reject.
+	if err := s.SaveCheckpoint(ctx, taskIDs[0], 0, []byte(`{"step":1}`)); err == nil {
+		t.Error("SaveCheckpoint: expected error in running status, got nil")
+	}
+
+	_, _ = s.PreemptGang(ctx, gangID, taskIDs[0])
+
+	// Wrong epoch: reject.
+	if err := s.SaveCheckpoint(ctx, taskIDs[0], 999, []byte(`{"step":1}`)); err == nil {
+		t.Error("SaveCheckpoint: expected error on epoch mismatch, got nil")
+	}
+
+	// Correct epoch: succeed.
+	data := []byte(`{"step":42}`)
+	if err := s.SaveCheckpoint(ctx, taskIDs[0], 1, data); err != nil {
+		t.Fatalf("SaveCheckpoint: %v", err)
+	}
+	got, found := s.GetCheckpoint(ctx, taskIDs[0])
+	if !found {
+		t.Fatal("GetCheckpoint: not found after save")
+	}
+	// Compare JSON semantically, not byte-for-byte. Postgres stores the
+	// checkpoint in a JSONB column, which parses the payload on insert
+	// and canonicalizes whitespace on read (e.g. {"step":42} becomes
+	// {"step": 42}). The scheduler treats checkpoints as opaque JSON;
+	// whitespace fidelity is not part of the contract.
+	var gotVal, wantVal any
+	if err := json.Unmarshal(got, &gotVal); err != nil {
+		t.Fatalf("GetCheckpoint: unmarshal got: %v", err)
+	}
+	if err := json.Unmarshal(data, &wantVal); err != nil {
+		t.Fatalf("GetCheckpoint: unmarshal want: %v", err)
+	}
+	if !reflect.DeepEqual(gotVal, wantVal) {
+		t.Errorf("GetCheckpoint = %s, want (semantically) %s", got, data)
 	}
 }

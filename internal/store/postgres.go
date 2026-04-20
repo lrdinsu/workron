@@ -98,7 +98,8 @@ func pgMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 		outputs           JSONB,
 		reservation_epoch INTEGER DEFAULT 0,
 		reserved_at       TIMESTAMPTZ,
-		preemption_epoch  INTEGER DEFAULT 0
+		preemption_epoch  INTEGER DEFAULT 0,
+		drain_started_at  TIMESTAMPTZ
 	)`
 	if _, err := pool.Exec(ctx, jobsSchema); err != nil {
 		return err
@@ -125,7 +126,8 @@ const pgJobColumns = `id, command, status, created_at, started_at, done_at,
 	last_heartbeat, max_retries, attempts, depends_on,
 	resources, worker_id, priority, queue_name,
 	gang_id, gang_size, gang_index,
-	checkpoint, outputs, reservation_epoch, reserved_at, preemption_epoch`
+	checkpoint, outputs, reservation_epoch, reserved_at, preemption_epoch,
+	drain_started_at`
 
 func (s *PostgresStore) AddJob(ctx context.Context, params AddJobParams) string {
 	id := generateID()
@@ -191,7 +193,8 @@ func (s *PostgresStore) ClaimJob(ctx context.Context) (*Job, bool) {
 		          jobs.done_at, jobs.last_heartbeat, jobs.max_retries, jobs.attempts, jobs.depends_on,
 		          jobs.resources, jobs.worker_id, jobs.priority, jobs.queue_name,
 		          jobs.gang_id, jobs.gang_size, jobs.gang_index,
-		          jobs.checkpoint, jobs.outputs, jobs.reservation_epoch, jobs.reserved_at, jobs.preemption_epoch`,
+		          jobs.checkpoint, jobs.outputs, jobs.reservation_epoch, jobs.reserved_at, jobs.preemption_epoch,
+		          jobs.drain_started_at`,
 		time.Now(),
 	)
 	return pgScanJob(row)
@@ -290,6 +293,7 @@ func pgScanJob(row pgx.Row) (*Job, bool) {
 		&resourcesJSON, &j.WorkerID, &j.Priority, &j.QueueName,
 		&j.GangID, &j.GangSize, &j.GangIndex,
 		&checkpointJSON, &outputsJSON, &j.ReservationEpoch, &j.ReservedAt, &j.PreemptionEpoch,
+		&j.DrainStartedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, false
@@ -323,6 +327,7 @@ func (s *PostgresStore) pgQueryJobs(ctx context.Context, query string, args ...a
 			&resourcesJSON, &j.WorkerID, &j.Priority, &j.QueueName,
 			&j.GangID, &j.GangSize, &j.GangIndex,
 			&checkpointJSON, &outputsJSON, &j.ReservationEpoch, &j.ReservedAt, &j.PreemptionEpoch,
+			&j.DrainStartedAt,
 		); err != nil {
 			panic(fmt.Sprintf("postgres: scan job row: %v", err))
 		}
@@ -600,7 +605,8 @@ func (s *PostgresStore) ClaimReservedJob(ctx context.Context, workerID string) (
 		          jobs.done_at, jobs.last_heartbeat, jobs.max_retries, jobs.attempts, jobs.depends_on,
 		          jobs.resources, jobs.worker_id, jobs.priority, jobs.queue_name,
 		          jobs.gang_id, jobs.gang_size, jobs.gang_index,
-		          jobs.checkpoint, jobs.outputs, jobs.reservation_epoch, jobs.reserved_at, jobs.preemption_epoch`,
+		          jobs.checkpoint, jobs.outputs, jobs.reservation_epoch, jobs.reserved_at, jobs.preemption_epoch,
+		          jobs.drain_started_at`,
 		workerID, time.Now(),
 	)
 	return pgScanJob(row)
@@ -682,4 +688,216 @@ func (s *PostgresStore) SetReservedAt(id string, t time.Time) {
 	if err != nil {
 		panic(fmt.Sprintf("postgres: set reserved_at: %v", err))
 	}
+}
+
+// SetDrainStartedAt sets a job's drain_started_at to a specific time.
+// Used for testing force-drain timeout behavior.
+func (s *PostgresStore) SetDrainStartedAt(id string, t time.Time) {
+	_, err := s.pool.Exec(context.Background(),
+		`UPDATE jobs SET drain_started_at = $1 WHERE id = $2`, t, id)
+	if err != nil {
+		panic(fmt.Sprintf("postgres: set drain_started_at: %v", err))
+	}
+}
+
+// --- Preemption ---
+
+// PreemptGang enters the gang into coordinated drain if any task is running.
+// See GangStore.PreemptGang for the full contract.
+func (s *PostgresStore) PreemptGang(ctx context.Context, gangID string, triggerJobID string) (PreemptGangResult, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return PreemptGangResult{}, fmt.Errorf("postgres: begin preempt tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock the gang's rows inside a CTE so concurrent admission/heartbeat
+	// paths see a consistent snapshot for this transition. Postgres
+	// forbids FOR UPDATE directly on an aggregate query, so the CTE
+	// performs the row lock and the outer SELECT aggregates over the
+	// already-locked set.
+	var running, maxEpoch int
+	if err := tx.QueryRow(ctx,
+		`WITH locked AS (
+		    SELECT status, preemption_epoch FROM jobs
+		    WHERE gang_id = $1 FOR UPDATE
+		 )
+		 SELECT COUNT(*) FILTER (WHERE status = 'running'),
+		        COALESCE(MAX(preemption_epoch), 0)
+		 FROM locked`, gangID,
+	).Scan(&running, &maxEpoch); err != nil {
+		return PreemptGangResult{}, fmt.Errorf("postgres: snapshot gang: %w", err)
+	}
+	if running == 0 {
+		return PreemptGangResult{Entered: false}, nil
+	}
+
+	newEpoch := maxEpoch + 1
+	now := time.Now()
+
+	// running -> preempting, with Attempts refund for non-trigger siblings.
+	tag, err := tx.Exec(ctx,
+		`UPDATE jobs
+		 SET status = 'preempting',
+		     preemption_epoch = $1,
+		     drain_started_at = $2,
+		     attempts = CASE
+		         WHEN id = $3 THEN attempts
+		         WHEN attempts > 0 THEN attempts - 1
+		         ELSE 0
+		     END
+		 WHERE gang_id = $4 AND status = 'running'`,
+		newEpoch, now, triggerJobID, gangID,
+	)
+	if err != nil {
+		return PreemptGangResult{}, fmt.Errorf("postgres: preempt running: %w", err)
+	}
+	affected := int(tag.RowsAffected())
+
+	// reserved -> blocked (clear worker_id, reserved_at)
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs SET status = 'blocked', worker_id = '', reserved_at = NULL
+		 WHERE gang_id = $1 AND status = 'reserved'`, gangID,
+	); err != nil {
+		return PreemptGangResult{}, fmt.Errorf("postgres: preempt reserved: %w", err)
+	}
+
+	// pending -> blocked
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs SET status = 'blocked' WHERE gang_id = $1 AND status = 'pending'`, gangID,
+	); err != nil {
+		return PreemptGangResult{}, fmt.Errorf("postgres: preempt pending: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return PreemptGangResult{}, fmt.Errorf("postgres: commit preempt: %w", err)
+	}
+
+	return PreemptGangResult{
+		Entered:      true,
+		Epoch:        newEpoch,
+		Transitioned: affected,
+	}, nil
+}
+
+// MarkPreempted is worker acknowledgement: preempting -> preempted.
+// See GangStore.MarkPreempted for the full contract.
+func (s *PostgresStore) MarkPreempted(ctx context.Context, jobID string, epoch int) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status = 'preempted'
+		 WHERE id = $1 AND status = 'preempting' AND preemption_epoch = $2`,
+		jobID, epoch,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: mark preempted: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("job %q: not preempting or epoch %d mismatch", jobID, epoch)
+	}
+	return nil
+}
+
+// ForceDrainPreempting is reaper timeout: preempting → preempted, no epoch check.
+// See GangStore.ForceDrainPreempting for the full contract.
+func (s *PostgresStore) ForceDrainPreempting(ctx context.Context, jobID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status = 'preempted' WHERE id = $1 AND status = 'preempting'`, jobID,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: force drain: %w", err)
+	}
+	return nil
+}
+
+// CompletePreemption normalizes a drained gang to blocked or failed.
+// See GangStore.CompletePreemption for the full contract.
+func (s *PostgresStore) CompletePreemption(ctx context.Context, gangID string) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("postgres: begin complete tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// CTE row lock + aggregate over the locked set (see PreemptGang for
+	// why FOR UPDATE can't sit directly on the aggregate query).
+	var total, inFlight, exhausted, terminal int
+	if err := tx.QueryRow(ctx,
+		`WITH locked AS (
+		    SELECT status, attempts, max_retries FROM jobs
+		    WHERE gang_id = $1 FOR UPDATE
+		 )
+		 SELECT COUNT(*),
+		        COUNT(*) FILTER (WHERE status IN ('running', 'preempting')),
+		        COUNT(*) FILTER (WHERE attempts >= max_retries),
+		        COUNT(*) FILTER (WHERE status IN ('done', 'failed'))
+		 FROM locked`, gangID,
+	).Scan(&total, &inFlight, &exhausted, &terminal); err != nil {
+		return false, fmt.Errorf("postgres: snapshot for complete: %w", err)
+	}
+	if total == 0 {
+		return false, fmt.Errorf("gang %q: no tasks found", gangID)
+	}
+	if inFlight > 0 {
+		return false, nil
+	}
+
+	// Exhausted retries OR already-terminal sibling -> gang fails.
+	target := string(StatusBlocked)
+	var doneAt *time.Time
+	if exhausted > 0 || terminal > 0 {
+		target = string(StatusFailed)
+		t := time.Now()
+		doneAt = &t
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs
+		 SET status = $1,
+		     worker_id = '',
+		     reserved_at = NULL,
+		     drain_started_at = NULL,
+		     done_at = CASE WHEN $1 = 'failed' THEN $2 ELSE done_at END
+		 WHERE gang_id = $3 AND status IN ('preempted', 'blocked')`,
+		target, doneAt, gangID,
+	); err != nil {
+		return false, fmt.Errorf("postgres: complete preemption: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("postgres: commit complete: %w", err)
+	}
+	return true, nil
+}
+
+// SaveCheckpoint stores raw bytes on the job, epoch-guarded.
+// See GangStore.SaveCheckpoint for the full contract.
+func (s *PostgresStore) SaveCheckpoint(ctx context.Context, jobID string, epoch int, data json.RawMessage) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET checkpoint = $1::jsonb
+		 WHERE id = $2 AND status = 'preempting' AND preemption_epoch = $3`,
+		string(data), jobID, epoch,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: save checkpoint: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("job %q: not preempting or epoch %d mismatch", jobID, epoch)
+	}
+	return nil
+}
+
+// GetCheckpoint returns the stored checkpoint bytes for a job, if any.
+func (s *PostgresStore) GetCheckpoint(ctx context.Context, jobID string) (json.RawMessage, bool) {
+	var checkpoint []byte
+	err := s.pool.QueryRow(ctx, `SELECT checkpoint FROM jobs WHERE id = $1`, jobID).Scan(&checkpoint)
+	if err == pgx.ErrNoRows {
+		return nil, false
+	}
+	if err != nil {
+		panic(fmt.Sprintf("postgres: get checkpoint: %v", err))
+	}
+	if len(checkpoint) == 0 {
+		return nil, false
+	}
+	return json.RawMessage(checkpoint), true
 }

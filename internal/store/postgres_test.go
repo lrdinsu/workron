@@ -399,3 +399,39 @@ func TestPostgres_FailGangRetry(t *testing.T) {
 func TestPostgres_FailGangPermanent(t *testing.T) {
 	testFailGangPermanent(t, newTestPostgresGangJobStore)
 }
+
+func TestPostgres_PreemptGangNoRunning(t *testing.T) {
+	testPreemptGangNoRunning(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_PreemptGangHomogeneousRunning(t *testing.T) {
+	testPreemptGangHomogeneousRunning(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_PreemptGangMixedStates(t *testing.T) {
+	testPreemptGangMixedStates(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_MarkPreemptedEpochMismatch(t *testing.T) {
+	testMarkPreemptedEpochMismatch(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_ForceDrainPreempting(t *testing.T) {
+	testForceDrainPreempting(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_CompletePreemptionBlocked(t *testing.T) {
+	testCompletePreemptionBlocked(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_PreemptionRetryConvergence(t *testing.T) {
+	testPreemptionRetryConvergence(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_CompletePreemptionPartialCompletion(t *testing.T) {
+	testCompletePreemptionPartialCompletion(t, newTestPostgresGangJobStore)
+}
+
+func TestPostgres_SaveCheckpointEpochGuard(t *testing.T) {
+	testSaveCheckpointEpochGuard(t, newTestPostgresGangJobStore)
+}
