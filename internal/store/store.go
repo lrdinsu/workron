@@ -162,6 +162,93 @@ type GangStore interface {
 	// siblings: to blocked (retry=true) or failed (retry=false).
 	// Running and done siblings are left untouched.
 	FailGang(ctx context.Context, gangID string, retry bool) error
+
+	// PreemptGang initiates a coordinated drain for a gang.
+	//
+	// Prerequisites:
+	// At least one task in the gang must be actively 'running'. If no tasks
+	// are running, this returns Entered=false and makes no changes, signaling
+	// the caller to fall back to the instant-abort FailGang path.
+	//
+	// State Mutations (executed atomically):
+	//   - 'running' tasks: Moved to 'preempting'. Bumps PreemptionEpoch and
+	//     stamps DrainStartedAt.
+	//     *Retry Refund:* Decrements Attempts by 1 for all running tasks EXCEPT
+	//     the triggerJobID. The trigger keeps the +1 it received on claim (representing
+	//     the real failure). Innocent siblings are refunded so scheduler-driven
+	//     preemption does not unfairly burn their retry budget.
+	//   - 'reserved' tasks: Moved to 'blocked'. Clears WorkerID and ReservedAt.
+	//   - 'pending' tasks: Moved to 'blocked'.
+	//   - 'blocked' tasks: Left as 'blocked'.
+	//   - 'done' / 'failed' tasks: Left untouched. Their presence will later force
+	//     CompletePreemption to route the entire gang to failed, preserving
+	//     restart-all semantics.
+	//   - 'preempting' / 'preempted' tasks: Left untouched defensively. These
+	//     should not appear during normal operation, as a gang cannot re-enter
+	//     admission until the previous drain completes.
+	PreemptGang(ctx context.Context, gangID string, triggerJobID string) (PreemptGangResult, error)
+
+	// MarkPreempted is worker acknowledgement: preempting -> preempted.
+	// Requires the job's current status to be preempting and the supplied
+	// epoch to match the current PreemptionEpoch.
+	MarkPreempted(ctx context.Context, jobID string, epoch int) error
+
+	// ForceDrainPreempting is reaper timeout: preempting -> preempted.
+	// Valid only when the job is currently preempting; does not touch
+	// preempted/done/failed. No epoch check. Idempotent.
+	ForceDrainPreempting(ctx context.Context, jobID string) error
+
+	// CompletePreemption finalizes the drain cycle for a gang.
+	//
+	// Prerequisites:
+	// This is called once no task in the gang is actively executing or shutting down
+	// (i.e., zero tasks are currently in 'running' or 'preempting').
+	// Returns completed=false if the gang is still actively draining.
+	//
+	// Decision Rules:
+	// The final state of the gang is decided strictly based on its members:
+	//   1. gang → failed: If any task has Attempts >= MaxRetries, OR if any
+	//      task is already 'done' or 'failed'. (Because Workron uses restart-all
+	//      semantics, a gang cannot be cleanly re-admitted if one of its tasks
+	//      has already permanently terminated).
+	//   2. gang → blocked: If none of the above are true, the gang becomes
+	//      eligible for re-admission in the next scheduling cycle.
+	//
+	// State Mutations:
+	// When applying the decided target state (blocked or failed):
+	//   - 'preempted' and 'blocked' tasks are moved to the target state.
+	//   - 'done' and 'failed' tasks are left as-is (preserving their historical outcomes).
+	//   - Attempts counters are NOT modified. The retry refund for innocent siblings was
+	//   handled during PreemptGang, so current values accurately reflect real failures.
+	//   - WorkerID, ReservedAt, and DrainStartedAt are cleared.
+	//   - Checkpoints are preserved.
+	CompletePreemption(ctx context.Context, gangID string) (completed bool, err error)
+
+	// SaveCheckpoint stores raw checkpoint bytes for a job.
+	//
+	// Valid only when the job's current status is 'preempting' and the supplied
+	// epoch matches the job's PreemptionEpoch. This strict epoch binding prevents
+	// a stale checkpoint from an earlier drain round from overwriting a later one.
+	//
+	// Note: This is a single slot per job. A successful save completely overwrites
+	// any previously stored checkpoint data.
+	SaveCheckpoint(ctx context.Context, jobID string, epoch int, data json.RawMessage) error
+
+	// GetCheckpoint returns the stored bytes (if any).
+	GetCheckpoint(ctx context.Context, jobID string) (data json.RawMessage, found bool)
+}
+
+// PreemptGangResult summarizes the outcome of a PreemptGang call.
+type PreemptGangResult struct {
+	// Entered is true if the store transitioned the gang into drain
+	// (i.e., at least one running task was moved to preempting).
+	Entered bool
+	// Epoch is the new shared PreemptionEpoch stamped on all tasks
+	// moved into preempting in this call. Zero if Entered is false.
+	Epoch int
+	// Transitioned is the number of tasks moved running -> preempting.
+	// Zero if Entered is false
+	Transitioned int
 }
 
 // generateID returns a unique job ID using a UUID v4.
