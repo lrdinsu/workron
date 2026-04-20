@@ -625,8 +625,10 @@ func (s *PostgresStore) RollbackGang(ctx context.Context, gangID string) error {
 	return nil
 }
 
-// FailGang handles gang failure. Only changes blocked/reserved/pending siblings.
-// Running and done siblings are left untouched.
+// FailGang is the legacy non-preemption failure-propagation path,
+// reached by handleJobFail and the reaper when PreemptGang returned
+// Entered=false (no sibling was running, so there was no live execution
+// attempt to drain). See GangStore.FailGang for the full contract.
 func (s *PostgresStore) FailGang(ctx context.Context, gangID string, retry bool) error {
 	targetStatus := string(StatusFailed)
 	if retry {

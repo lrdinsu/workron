@@ -436,8 +436,10 @@ func (s *MemoryStore) RollbackGang(_ context.Context, gangID string) error {
 	return nil
 }
 
-// FailGang handles gang failure. Only changes blocked/reserved/pending siblings.
-// Running and done siblings are left untouched.
+// FailGang is the legacy non-preemption failure-propagation path,
+// reached by handleJobFail and the reaper when PreemptGang returned
+// Entered=false (no sibling was running, so there was no live execution
+// attempt to drain). See GangStore.FailGang for the full contract.
 func (s *MemoryStore) FailGang(_ context.Context, gangID string, retry bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
