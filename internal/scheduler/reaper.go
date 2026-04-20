@@ -76,8 +76,13 @@ func runReaperTick(ctx context.Context, s store.JobStore, logger *slog.Logger, m
 }
 
 // reap scans running jobs and re-queues or fails any with stale heartbeats.
+// For gang tasks, entering coordinated drain via PreemptGang takes precedence
+// over the legacy re-queue/fail path: if any sibling is still running, the
+// whole gang goes through preempt/complete instead of leaving live peers behind.
 func reap(ctx context.Context, s store.JobStore, logger *slog.Logger, m *metrics.Metrics) {
 	now := time.Now()
+	gs, _ := s.(store.GangStore)
+
 	for _, job := range s.ListRunningJobs(ctx) {
 		// Use heartbeat if available, otherwise fall back to when the job was claimed
 		lastContact := job.LastHeartbeat
@@ -87,6 +92,27 @@ func reap(ctx context.Context, s store.JobStore, logger *slog.Logger, m *metrics
 
 		if lastContact != nil && now.Sub(*lastContact) <= heartbeatTimeout {
 			continue // healthy heartbeat, skip
+		}
+
+		// Gang preemption path: before flipping this task's status, try to
+		// enter coordinated drain. If any sibling is still running, the store
+		// moves all running tasks (this one included) to preempting and we
+		// skip the legacy status flip + FailGang.
+		if job.GangID != "" && gs != nil {
+			res, err := gs.PreemptGang(ctx, job.GangID, job.ID)
+			if err != nil {
+				logger.Error("reaper preempt gang failed", "gang_id", job.GangID, "job_id", job.ID, "error", err)
+				// Fall through so the dead task doesn't stay running forever.
+			} else if res.Entered {
+				logger.Info("reaper started gang drain",
+					"gang_id", job.GangID,
+					"trigger_job_id", job.ID,
+					"preemption_epoch", res.Epoch,
+					"transitioned", res.Transitioned,
+				)
+				m.JobsReaped.WithLabelValues("requeued").Inc()
+				continue
+			}
 		}
 
 		// No heartbeat at all, or heartbeat is stale: the worker is assumed dead
@@ -101,13 +127,12 @@ func reap(ctx context.Context, s store.JobStore, logger *slog.Logger, m *metrics
 			m.JobsReaped.WithLabelValues("failed").Inc()
 		}
 
-		// Gang failure: propagate to blocked/reserved/pending siblings
-		if job.GangID != "" {
-			if gs, ok := s.(store.GangStore); ok {
-				logger.Info("reaper triggering gang failure", "gang_id", job.GangID, "job_id", job.ID)
-				if err := gs.FailGang(ctx, job.GangID, retry); err != nil {
-					logger.Error("reaper failed to propagate gang failure", "gang_id", job.GangID, "error", err)
-				}
+		// Legacy gang failure path: only reached when PreemptGang returned
+		// Entered=false (no sibling was running).
+		if job.GangID != "" && gs != nil {
+			logger.Info("reaper triggering gang failure", "gang_id", job.GangID, "job_id", job.ID)
+			if err := gs.FailGang(ctx, job.GangID, retry); err != nil {
+				logger.Error("reaper failed to propagate gang failure", "gang_id", job.GangID, "error", err)
 			}
 		}
 	}
