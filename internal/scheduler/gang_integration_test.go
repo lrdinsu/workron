@@ -285,23 +285,82 @@ func TestGangIntegration_TaskFailure(t *testing.T) {
 		e.claimJob(task.WorkerID)
 	}
 
-	// Fail one task, siblings are running, should be left untouched.
-	// handleJobFail sets the individual task to pending (retry),
-	// then FailGang changes pending siblings to blocked. So the failed
-	// task ends up blocked (it was pending, which is in the affected set).
+	// Fail on a gang task whose siblings are still running triggers coordinated
+	// drain via PreemptGang. All three tasks move to preempting with the same
+	// PreemptionEpoch and a DrainStartedAt stamp: the drain round for this gang.
 	e.reportFail(tasks[0].ID)
 
-	job0, _ := e.store.GetJob(ctx, tasks[0].ID)
-	if job0.Status != store.StatusBlocked {
-		t.Errorf("failed task status = %q, want blocked (retry via FailGang)", job0.Status)
+	var sharedEpoch int
+	for i, task := range tasks {
+		job, _ := e.store.GetJob(ctx, task.ID)
+		if job.Status != store.StatusPreempting {
+			t.Errorf("task %s status = %q, want preempting (coordinated drain)", task.ID, job.Status)
+		}
+		if job.PreemptionEpoch == 0 {
+			t.Errorf("task %s preemption_epoch = 0, want nonzero", task.ID)
+		}
+		if job.DrainStartedAt == nil {
+			t.Errorf("task %s drain_started_at = nil, want set", task.ID)
+		}
+		if i == 0 {
+			sharedEpoch = job.PreemptionEpoch
+		} else if job.PreemptionEpoch != sharedEpoch {
+			t.Errorf("task %s preemption_epoch = %d, want shared %d across gang", task.ID, job.PreemptionEpoch, sharedEpoch)
+		}
 	}
 
-	// Running siblings should be untouched (no preemption)
+	// Retry-budget refund: the triggering task keeps its claim-time
+	// attempts=1 (real failure); innocent siblings are refunded to 0.
+	trigger, _ := e.store.GetJob(ctx, tasks[0].ID)
+	if trigger.Attempts != 1 {
+		t.Errorf("trigger attempts = %d, want 1 (real failure retained)", trigger.Attempts)
+	}
 	for _, task := range tasks[1:] {
 		job, _ := e.store.GetJob(ctx, task.ID)
-		if job.Status != store.StatusRunning {
-			t.Errorf("running sibling %s status = %q, want running (untouched)", task.ID, job.Status)
+		if job.Attempts != 0 {
+			t.Errorf("sibling %s attempts = %d, want 0 (refunded)", task.ID, job.Attempts)
 		}
+	}
+}
+
+// TestGangIntegration_TaskFailureMixedStates covers the case where PreemptGang
+// fires while some gang tasks are still reserved (never claimed). Running tasks
+// enter coordinated drain; a reserved task, which has no running process to signal,
+// bypasses preempting and goes straight to blocked.
+func TestGangIntegration_TaskFailureMixedStates(t *testing.T) {
+	e := newGangTestEnv(t)
+	ctx := context.Background()
+
+	// Register 3 workers, submit 3-task gang.
+	for i := 0; i < 3; i++ {
+		wid := "w" + string(rune('0'+i))
+		e.registerWorker(wid, "host:800"+string(rune('0'+i)), store.ResourceSpec{VRAMMB: 16000})
+	}
+	gangID, _ := e.submitGang("train", 3, &store.ResourceSpec{VRAMMB: 8000})
+
+	// Reserve all three, but claim only the first two. Third stays reserved.
+	e.runAdmission()
+	tasks := e.getGang(gangID)
+	e.claimJob(tasks[0].WorkerID)
+	e.claimJob(tasks[1].WorkerID)
+
+	// Fail the first running task.
+	e.reportFail(tasks[0].ID)
+
+	// The two running tasks -> preempting (drain started).
+	for _, task := range tasks[:2] {
+		job, _ := e.store.GetJob(ctx, task.ID)
+		if job.Status != store.StatusPreempting {
+			t.Errorf("running task %s status = %q, want preempting", task.ID, job.Status)
+		}
+	}
+	// The reserved task -> blocked, with worker assignment cleared.
+	reserved, _ := e.store.GetJob(ctx, tasks[2].ID)
+	if reserved.Status != store.StatusBlocked {
+		t.Errorf("reserved task status = %q, want blocked (no process to drain)", reserved.Status)
+	}
+	if reserved.WorkerID != "" {
+		t.Errorf("reserved task worker_id = %q, want cleared", reserved.WorkerID)
 	}
 }
 
