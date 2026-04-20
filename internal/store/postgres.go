@@ -711,13 +711,20 @@ func (s *PostgresStore) PreemptGang(ctx context.Context, gangID string, triggerJ
 	}
 	defer tx.Rollback(ctx)
 
-	// Lock the gang's rows so concurrent admission/heartbeat paths see a
-	// consistent snapshot of the gang's task states for this transition.
+	// Lock the gang's rows inside a CTE so concurrent admission/heartbeat
+	// paths see a consistent snapshot for this transition. Postgres
+	// forbids FOR UPDATE directly on an aggregate query, so the CTE
+	// performs the row lock and the outer SELECT aggregates over the
+	// already-locked set.
 	var running, maxEpoch int
 	if err := tx.QueryRow(ctx,
-		`SELECT COUNT(*) FILTER (WHERE status = 'running'),
+		`WITH locked AS (
+		    SELECT status, preemption_epoch FROM jobs
+		    WHERE gang_id = $1 FOR UPDATE
+		 )
+		 SELECT COUNT(*) FILTER (WHERE status = 'running'),
 		        COALESCE(MAX(preemption_epoch), 0)
-		 FROM jobs WHERE gang_id = $1 FOR UPDATE`, gangID,
+		 FROM locked`, gangID,
 	).Scan(&running, &maxEpoch); err != nil {
 		return PreemptGangResult{}, fmt.Errorf("postgres: snapshot gang: %w", err)
 	}
@@ -811,13 +818,19 @@ func (s *PostgresStore) CompletePreemption(ctx context.Context, gangID string) (
 	}
 	defer tx.Rollback(ctx)
 
+	// CTE row lock + aggregate over the locked set (see PreemptGang for
+	// why FOR UPDATE can't sit directly on the aggregate query).
 	var total, inFlight, exhausted, terminal int
 	if err := tx.QueryRow(ctx,
-		`SELECT COUNT(*),
+		`WITH locked AS (
+		    SELECT status, attempts, max_retries FROM jobs
+		    WHERE gang_id = $1 FOR UPDATE
+		 )
+		 SELECT COUNT(*),
 		        COUNT(*) FILTER (WHERE status IN ('running', 'preempting')),
 		        COUNT(*) FILTER (WHERE attempts >= max_retries),
 		        COUNT(*) FILTER (WHERE status IN ('done', 'failed'))
-		 FROM jobs WHERE gang_id = $1 FOR UPDATE`, gangID,
+		 FROM locked`, gangID,
 	).Scan(&total, &inFlight, &exhausted, &terminal); err != nil {
 		return false, fmt.Errorf("postgres: snapshot for complete: %w", err)
 	}
