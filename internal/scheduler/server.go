@@ -346,6 +346,31 @@ func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Gang preemption path. If this job belongs to a gang, try to enter
+	// coordinated drain before touching the trigger's own status.
+	// The store decides atomically whether any sibling is still running;
+	// if so, running siblings (trigger included) move to preempting and
+	// non-running siblings go straight to blocked. We skip both the per-task
+	// status update and the legacy FailGang call in that case.
+	if job.GangID != "" && s.gangStore != nil {
+		res, err := s.gangStore.PreemptGang(ctx, job.GangID, id)
+		if err != nil {
+			logger.Error("preempt gang failed", "gang_id", job.GangID, "job_id", id, "error", err)
+			// Fall through to the legacy path on error so the job doesn't
+			// get stuck in running forever.
+		} else if res.Entered {
+			logger.Info("gang drain started",
+				"gang_id", job.GangID,
+				"trigger_job_id", id,
+				"preemption_epoch", res.Epoch,
+				"transitioned", res.Transitioned,
+			)
+			s.metrics.JobsRetried.Inc()
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+	}
+
 	// Retry logic: if attempts haven't been exhausted, re-queue as pending
 	retry := job.Attempts < job.MaxRetries
 	if retry {
@@ -358,8 +383,9 @@ func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 		s.metrics.JobsFailed.Inc()
 	}
 
-	// Gang failure: propagate to blocked/reserved/pending siblings.
-	// Running and done siblings are left untouched.
+	// Legacy gang failure path: reached only when PreemptGang returned
+	// Entered=false (no sibling was running). Propagates to
+	// blocked/reserved/pending siblings. Done siblings are left untouched.
 	if job.GangID != "" && s.gangStore != nil {
 		if retry {
 			logger.Info("gang task failed, retrying gang siblings", "gang_id", job.GangID, "job_id", id)

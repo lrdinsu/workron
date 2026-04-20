@@ -158,9 +158,22 @@ type GangStore interface {
 	// clearing worker_id and reserved_at.
 	RollbackGang(ctx context.Context, gangID string) error
 
-	// FailGang handles gang failure. Only changes blocked/reserved/pending
-	// siblings: to blocked (retry=true) or failed (retry=false).
-	// Running and done siblings are left untouched.
+	// FailGang propagates a gang task's failure to its non-executing
+	// siblings. It is the fallback path taken by handleJobFail and the
+	// reaper when PreemptGang returns Entered=false — i.e. when no
+	// sibling is currently running, so there is no live execution
+	// attempt to drain. When any sibling is still running at failure
+	// time, the caller goes through PreemptGang instead, which moves
+	// the running tasks into coordinated drain.
+	//
+	// Status transitions (retry flag decides blocked-vs-failed target):
+	//   - blocked / reserved / pending -> blocked (retry=true) or failed (retry=false)
+	//   - running / preempting / preempted / done / failed → untouched
+	//
+	// When a sibling moves to blocked, WorkerID and ReservedAt are
+	// cleared. When moving to failed, DoneAt is stamped. Retry=true is
+	// chosen by the caller when the triggering task still has
+	// attempts remaining; retry=false when retries are exhausted.
 	FailGang(ctx context.Context, gangID string, retry bool) error
 
 	// PreemptGang initiates a coordinated drain for a gang.
@@ -247,7 +260,7 @@ type PreemptGangResult struct {
 	// moved into preempting in this call. Zero if Entered is false.
 	Epoch int
 	// Transitioned is the number of tasks moved running -> preempting.
-	// Zero if Entered is false
+	// Zero if Entered is false.
 	Transitioned int
 }
 
