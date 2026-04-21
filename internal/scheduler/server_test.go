@@ -375,6 +375,85 @@ func TestHandleHeartbeat_NotRunning(t *testing.T) {
 	}
 }
 
+// TestHandleHeartbeat_RunningEmptyBody confirms that a running job's
+// heartbeat response has no body. Back-compat: existing workers that
+// don't decode the response body keep working.
+func TestHandleHeartbeat_RunningEmptyBody(t *testing.T) {
+	s := store.NewMemoryStore()
+	id := s.AddJob(context.Background(), store.AddJobParams{Command: "echo hello"})
+	s.ClaimJob(context.Background())
+
+	srv := NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
+	r := httptest.NewRequest(http.MethodPost, "/jobs/"+id+"/heartbeat", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("expected empty body for running job, got %q", w.Body.String())
+	}
+}
+
+// TestHandleHeartbeat_PreemptingReturnsAction confirms that a heartbeat
+// on a preempting job returns JSON carrying action="preempt" and the
+// current PreemptionEpoch, so the worker knows to stop its process and
+// which epoch to echo back when it reports /preempted.
+func TestHandleHeartbeat_PreemptingReturnsAction(t *testing.T) {
+	ctx := context.Background()
+	s := store.NewMemoryStore()
+
+	// Drive a gang through reserve -> claim -> preempt to get one task into preempting.
+	_ = s.RegisterWorker(ctx, store.Worker{
+		ID: "w0", ExecAddr: "h:1", Resources: store.ResourceSpec{VRAMMB: 16000},
+	})
+	gangID, taskIDs := s.AddGang(ctx, store.AddJobParams{
+		Command:   "train",
+		GangSize:  1,
+		Resources: &store.ResourceSpec{VRAMMB: 8000},
+	})
+	if err := s.ReserveGang(ctx, gangID, map[string]string{taskIDs[0]: "w0"}, 1); err != nil {
+		t.Fatalf("ReserveGang: %v", err)
+	}
+	if _, ok := s.ClaimReservedJob(ctx, "w0"); !ok {
+		t.Fatal("ClaimReservedJob: no job found")
+	}
+	res, err := s.PreemptGang(ctx, gangID, taskIDs[0])
+	if err != nil {
+		t.Fatalf("PreemptGang: %v", err)
+	}
+	if !res.Entered {
+		t.Fatalf("PreemptGang Entered=false, want true")
+	}
+
+	srv := NewServer(s, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
+	r := httptest.NewRequest(http.MethodPost, "/jobs/"+taskIDs[0]+"/heartbeat", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp heartbeatResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Action != "preempt" {
+		t.Errorf("action = %q, want preempt", resp.Action)
+	}
+	if resp.PreemptionEpoch != res.Epoch {
+		t.Errorf("preemption_epoch = %d, want %d", resp.PreemptionEpoch, res.Epoch)
+	}
+
+	// Heartbeat should still refresh last_heartbeat for preempting jobs,
+	// workers keep pinging while they shut down.
+	job, _ := s.GetJob(ctx, taskIDs[0])
+	if job.LastHeartbeat == nil {
+		t.Error("expected last_heartbeat to be refreshed for preempting job")
+	}
+}
+
 // --- DAG dependency tests ---
 
 func TestHandleSubmitJob_WithDependencies(t *testing.T) {

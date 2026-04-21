@@ -400,8 +400,22 @@ func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// heartbeatResponse is the JSON body returned when the scheduler wants the
+// worker to take an action on its next heartbeat. For ordinary running
+// jobs the body is empty (back-compat with clients that do not decode it).
+// For preempting jobs the body carries action="preempt" and the
+// PreemptionEpoch the worker should echo back when it calls
+// /jobs/{id}/preempted after its process exits.
+type heartbeatResponse struct {
+	Action          string `json:"action"`
+	PreemptionEpoch int    `json:"preemption_epoch,omitempty"`
+}
+
 // handleHeartbeat handles POST /jobs/{id}/heartbeat
 // Worker signals it is still alive and working on this job.
+// Accepts heartbeats from both running and preempting jobs: a preempting
+// job's worker still needs to heartbeat until its process exits, and
+// the response body is how the scheduler tells it to stop.
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ctx := r.Context()
@@ -412,12 +426,21 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if job.Status != store.StatusRunning {
+	if job.Status != store.StatusRunning && job.Status != store.StatusPreempting {
 		http.Error(w, "job is not running", http.StatusConflict)
 		return
 	}
 
 	s.store.UpdateHeartbeat(ctx, id)
+
+	if job.Status == store.StatusPreempting {
+		s.writeJSON(w, http.StatusOK, heartbeatResponse{
+			Action:          "preempt",
+			PreemptionEpoch: job.PreemptionEpoch,
+		})
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
