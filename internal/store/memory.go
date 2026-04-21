@@ -149,10 +149,11 @@ func (s *MemoryStore) UpdateHeartbeat(_ context.Context, id string) {
 }
 
 // SendHeartbeat wraps UpdateHeartbeat to satisfy the worker.JobSource interface.
-// In-process, this never fails. The returned string is a heartbeat action
-func (s *MemoryStore) SendHeartbeat(ctx context.Context, id string) (string, error) {
+// In-process, this never fails and always returns an empty result:
+// the in-process path does not participate in gang preemption signaling.
+func (s *MemoryStore) SendHeartbeat(ctx context.Context, id string) (HeartbeatResult, error) {
 	s.UpdateHeartbeat(ctx, id)
-	return "", nil
+	return HeartbeatResult{}, nil
 }
 
 // UnblockReady transitions blocked jobs to pending when all their

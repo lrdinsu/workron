@@ -235,9 +235,11 @@ func (s *PostgresStore) UpdateHeartbeat(ctx context.Context, id string) {
 }
 
 // SendHeartbeat wraps UpdateHeartbeat to satisfy the worker.JobSource interface.
-func (s *PostgresStore) SendHeartbeat(ctx context.Context, id string) (string, error) {
+// Direct-store mode does not participate in gang preemption signaling,
+// so the result is always empty.
+func (s *PostgresStore) SendHeartbeat(ctx context.Context, id string) (HeartbeatResult, error) {
 	s.UpdateHeartbeat(ctx, id)
-	return "", nil
+	return HeartbeatResult{}, nil
 }
 
 // UnblockReady transitions blocked jobs to pending when all their
