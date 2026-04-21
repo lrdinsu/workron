@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/lrdinsu/workron/internal/store"
@@ -16,7 +17,15 @@ const heartbeatInterval = 5 * time.Second
 type JobSource interface {
 	ClaimJob(ctx context.Context) (*store.Job, bool)
 	UpdateJobStatus(ctx context.Context, id string, status store.JobStatus)
-	SendHeartbeat(ctx context.Context, id string) (string, error)
+	SendHeartbeat(ctx context.Context, id string) (store.HeartbeatResult, error)
+}
+
+// preemptReporter is an optional interface satisfied by JobSource implementations
+// that can tell the scheduler a job has finished draining after a preempt signal.
+// SchedulerClient satisfies it; direct-store sources (MemoryStore, SQLiteStore, PostgresStore)
+// do not, because the in-process path does not use gang preemption signaling.
+type preemptReporter interface {
+	ReportPreempted(ctx context.Context, id string, epoch int) error
 }
 
 // Worker polls a JobSource and executes jobs
@@ -76,15 +85,67 @@ func (w *Worker) Start(ctx context.Context) {
 // process executes a single job and updates its status via the source.
 // If running in-process (store.JobStore), the worker handles retries directly.
 // If running over HTTP (SchedulerClient), the scheduler handles retry decisions.
+//
+// For gang preemption: the heartbeat goroutine notices action="preempt"
+// on the response, records the epoch, and closes a stop channel that
+// the executor watches. The executor sends SIGTERM to its child and
+// escalates to SIGKILL after a grace window. Once the executor returns,
+// if a preempt was observed, the worker reports /preempted with the
+// epoch instead of /done or /fail.
 func (w *Worker) process(ctx context.Context, job *store.Job) {
 	w.logger.Info("job picked up", "job_id", job.ID, "attempt", job.Attempts, "max_retries", job.MaxRetries, "command", job.Command)
 
-	// Start a heartbeat goroutine, canceled when the job finishes
+	// preemptCh is closed once (guarded by sync.Once) when the heartbeat
+	// goroutine first observes action="preempt". The executor watches it
+	// to know when to send SIGTERM. Repeated preempt heartbeats are safe.
+	preemptCh := make(chan struct{})
+	var preemptOnce sync.Once
+	var preemptMu sync.Mutex
+	var preemptEpoch int
+
+	recordPreempt := func(epoch int) {
+		preemptMu.Lock()
+		if preemptEpoch == 0 {
+			preemptEpoch = epoch
+		}
+		preemptMu.Unlock()
+		preemptOnce.Do(func() { close(preemptCh) })
+	}
+
+	// Heartbeat goroutine, canceled when the job finishes.
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	defer hbCancel()
-	go w.sendHeartbeats(hbCtx, job.ID)
+	go w.sendHeartbeats(hbCtx, job.ID, recordPreempt)
 
-	err := w.executor.Execute(ctx, job.Command, job.Env)
+	err := w.executor.Execute(ctx, job.Command, job.Env, preemptCh)
+
+	// If the heartbeat loop ever flagged preemption, take the preempt
+	// reporting path instead of treating the executor's non-nil error
+	// as a normal failure (the error is "signal: terminated" or similar).
+	preempted := false
+	select {
+	case <-preemptCh:
+		preempted = true
+	default:
+	}
+
+	if preempted {
+		preemptMu.Lock()
+		epoch := preemptEpoch
+		preemptMu.Unlock()
+		if rp, ok := w.source.(preemptReporter); ok {
+			if rerr := rp.ReportPreempted(ctx, job.ID, epoch); rerr != nil {
+				w.logger.Warn("report preempted failed", "job_id", job.ID, "preemption_epoch", epoch, "error", rerr)
+				return
+			}
+			w.logger.Info("job preempted", "job_id", job.ID, "preemption_epoch", epoch)
+			return
+		}
+		// In-process sources don't implement preempt reporting; fall through
+		// to the normal failure-report path so the job isn't left running.
+		w.logger.Warn("preempt observed but source does not implement ReportPreempted", "job_id", job.ID)
+	}
+
 	if err != nil {
 		if job.Attempts < job.MaxRetries {
 			w.logger.Warn("job failed, retrying", "job_id", job.ID, "attempt", job.Attempts, "max_retries", job.MaxRetries, "error", err)
@@ -101,9 +162,12 @@ func (w *Worker) process(ctx context.Context, job *store.Job) {
 	w.source.UpdateJobStatus(ctx, job.ID, store.StatusDone)
 }
 
-// sendHeartbeats periodically ping the source to signal the worker is still alive.
-// It stops when the context is canceled (i.e., the job finishes).
-func (w *Worker) sendHeartbeats(ctx context.Context, jobID string) {
+// sendHeartbeats periodically pings the source to signal the worker is
+// still alive and inspects the response for scheduler actions. When an
+// action="preempt" heartbeat arrives, onPreempt is called with the
+// scheduler-supplied epoch; the callback is safe to invoke repeatedly
+// (the caller guards against double-triggering).
+func (w *Worker) sendHeartbeats(ctx context.Context, jobID string, onPreempt func(epoch int)) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -112,10 +176,13 @@ func (w *Worker) sendHeartbeats(ctx context.Context, jobID string) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			action, err := w.source.SendHeartbeat(ctx, jobID)
-			_ = action // placeholder for preemption logic in the future
+			res, err := w.source.SendHeartbeat(ctx, jobID)
 			if err != nil {
 				w.logger.Warn("heartbeat failed", "job_id", jobID, "error", err)
+				continue
+			}
+			if res.Action == "preempt" {
+				onPreempt(res.PreemptionEpoch)
 			}
 		}
 	}

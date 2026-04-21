@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -142,18 +143,21 @@ func (c *SchedulerClient) UpdateJobStatus(ctx context.Context, id string, status
 	}
 }
 
-// SendHeartbeat tells the scheduler the worker is still alive and working on this job.
-// The returned string is a heartbeat action (empty for now, future will return "preempt"
-// via the HTTP response body when the scheduler wants the worker to stop).
-func (c *SchedulerClient) SendHeartbeat(ctx context.Context, id string) (string, error) {
+// SendHeartbeat tells the scheduler the worker is still alive and working
+// on this job. For ordinary running jobs the scheduler returns 200 with
+// an empty body; for preempting jobs the body is JSON carrying
+// {"action":"preempt","preemption_epoch":N}, which the worker must honor
+// by stopping the process and reporting /jobs/{id}/preempted with the
+// same epoch.
+func (c *SchedulerClient) SendHeartbeat(ctx context.Context, id string) (store.HeartbeatResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/jobs/"+id+"/heartbeat", nil)
 	if err != nil {
-		return "", fmt.Errorf("heartbeat for job %s: %w", id, err)
+		return store.HeartbeatResult{}, fmt.Errorf("heartbeat for job %s: %w", id, err)
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("heartbeat for job %s: %w", id, err)
+		return store.HeartbeatResult{}, fmt.Errorf("heartbeat for job %s: %w", id, err)
 	}
 
 	defer func() {
@@ -163,10 +167,57 @@ func (c *SchedulerClient) SendHeartbeat(ctx context.Context, id string) (string,
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("heartbeat for job %s: unexpected status %d", id, resp.StatusCode)
+		return store.HeartbeatResult{}, fmt.Errorf("heartbeat for job %s: unexpected status %d", id, resp.StatusCode)
 	}
 
-	return "", nil
+	// Empty body is the common case (running jobs). Decoding it with
+	// json.Decoder would return io.EOF, so peek at the Content-Length
+	// first byte before attempting.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return store.HeartbeatResult{}, fmt.Errorf("heartbeat for job %s: read body: %w", id, err)
+	}
+	if len(body) == 0 {
+		return store.HeartbeatResult{}, nil
+	}
+
+	var result store.HeartbeatResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		// Treat malformed body as no action rather than failing the heartbeat,
+		// the worker should keep pinging so the scheduler can retry the signal
+		// on its next response.
+		c.logger.Warn("heartbeat response body not JSON, ignoring",
+			"job_id", id, "error", err, "body_len", len(body))
+		return store.HeartbeatResult{}, nil
+	}
+	return result, nil
+}
+
+// ReportPreempted tells the scheduler that a preempted job's process
+// has exited. The epoch must match the PreemptionEpoch the scheduler
+// supplied on the preempt heartbeat response; a mismatch indicates a
+// stale round and the scheduler rejects it with 409.
+func (c *SchedulerClient) ReportPreempted(ctx context.Context, id string, epoch int) error {
+	url := fmt.Sprintf("%s/jobs/%s/preempted?epoch=%d", c.baseURL, id, epoch)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("report preempted for job %s: %w", id, err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("report preempted for job %s: %w", id, err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Error("failed to close response body", "error", closeErr)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("report preempted for job %s: unexpected status %d", id, resp.StatusCode)
+	}
+	return nil
 }
 
 // RegisterWorker announces this worker to the scheduler. Called once on startup
