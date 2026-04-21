@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -101,6 +102,19 @@ func (e *gangTestEnv) reportFail(jobID string) {
 	e.srv.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		e.t.Fatalf("report fail %s: expected 200, got %d: %s", jobID, w.Code, w.Body.String())
+	}
+}
+
+// reportPreempted calls POST /jobs/{id}/preempted?epoch=N, the worker ack
+// path a real deployment exercises via SchedulerClient.ReportPreempted.
+func (e *gangTestEnv) reportPreempted(jobID string, epoch int) {
+	e.t.Helper()
+	url := fmt.Sprintf("/jobs/%s/preempted?epoch=%d", jobID, epoch)
+	r := httptest.NewRequest(http.MethodPost, url, nil)
+	w := httptest.NewRecorder()
+	e.srv.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		e.t.Fatalf("report preempted %s epoch=%d: expected 200, got %d: %s", jobID, epoch, w.Code, w.Body.String())
 	}
 }
 
@@ -485,6 +499,122 @@ func TestGangIntegration_DrainCompletesToBlocked(t *testing.T) {
 		if task.Status != store.StatusReserved {
 			t.Errorf("task %s status = %q, want reserved after re-admission", task.ID, task.Status)
 		}
+	}
+}
+
+// TestGangIntegration_StuckGangRecovery drives the full preemption
+// round-trip the way a real deployment does: workers observe the preempt
+// action on their heartbeat response, call /preempted with the scheduler's
+// epoch, the reaper completes the gang, and admission places it again on the
+// next tick. This is the scenario the stuck-gang fix is meant to handle end to end.
+func TestGangIntegration_StuckGangRecovery(t *testing.T) {
+	e := newGangTestEnv(t)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		wid := "w" + string(rune('0'+i))
+		e.registerWorker(wid, "host:800"+string(rune('0'+i)), store.ResourceSpec{VRAMMB: 16000})
+	}
+	gangID, _ := e.submitGang("train", 3, &store.ResourceSpec{VRAMMB: 8000})
+
+	// Admission reserves; each worker claims its task.
+	e.runAdmission()
+	tasks := e.getGang(gangID)
+	for _, task := range tasks {
+		e.claimJob(task.WorkerID)
+	}
+
+	// Task 0 fails -> gang enters drain, all three become preempting.
+	e.reportFail(tasks[0].ID)
+	drained := e.getGang(gangID)
+	epoch := drained[0].PreemptionEpoch
+	for _, task := range drained {
+		if task.Status != store.StatusPreempting {
+			t.Fatalf("task %s status = %q, want preempting before acks", task.ID, task.Status)
+		}
+	}
+
+	// Each worker reports /preempted with the scheduler-supplied epoch.
+	for _, task := range drained {
+		e.reportPreempted(task.ID, epoch)
+	}
+
+	// Post-ack, every task should be in preempted; nothing has been
+	// completed yet because the reaper hasn't run.
+	for _, task := range tasks {
+		job, _ := e.store.GetJob(ctx, task.ID)
+		if job.Status != store.StatusPreempted {
+			t.Errorf("task %s status = %q, want preempted after ack", task.ID, job.Status)
+		}
+	}
+
+	// Reaper tick: no task is running/preempting anymore, so the gang
+	// completes to blocked (retries remain).
+	e.runCompleteDrainedPreemptions()
+
+	for _, task := range tasks {
+		job, _ := e.store.GetJob(ctx, task.ID)
+		if job.Status != store.StatusBlocked {
+			t.Errorf("task %s status = %q, want blocked after completion", task.ID, job.Status)
+		}
+	}
+
+	// Admission should re-reserve the gang on the next tick,
+	// proving the gang is no longer stuck.
+	e.runAdmission()
+	for _, task := range e.getGang(gangID) {
+		if task.Status != store.StatusReserved {
+			t.Errorf("task %s status = %q, want reserved after re-admission", task.ID, task.Status)
+		}
+	}
+}
+
+// TestHandleJobPreempted_EpochMismatchRejected ensures stale acks from
+// an earlier drain round cannot flip a task back to preempted.
+func TestHandleJobPreempted_EpochMismatchRejected(t *testing.T) {
+	e := newGangTestEnv(t)
+	ctx := context.Background()
+
+	for i := 0; i < 2; i++ {
+		wid := "w" + string(rune('0'+i))
+		e.registerWorker(wid, "host:800"+string(rune('0'+i)), store.ResourceSpec{VRAMMB: 16000})
+	}
+	gangID, _ := e.submitGang("train", 2, &store.ResourceSpec{VRAMMB: 8000})
+	e.runAdmission()
+	tasks := e.getGang(gangID)
+	for _, task := range tasks {
+		e.claimJob(task.WorkerID)
+	}
+	e.reportFail(tasks[0].ID)
+
+	// Stale epoch: scheduler must reject with 409 and not mutate state.
+	url := fmt.Sprintf("/jobs/%s/preempted?epoch=999", tasks[0].ID)
+	r := httptest.NewRequest(http.MethodPost, url, nil)
+	w := httptest.NewRecorder()
+	e.srv.ServeHTTP(w, r)
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected 409 on epoch mismatch, got %d: %s", w.Code, w.Body.String())
+	}
+	job, _ := e.store.GetJob(ctx, tasks[0].ID)
+	if job.Status != store.StatusPreempting {
+		t.Errorf("task should remain preempting after rejected ack, got %q", job.Status)
+	}
+}
+
+// TestHandleJobPreempted_MissingEpoch rejects calls without the
+// required query parameter so silent-zero acks can't slip through.
+func TestHandleJobPreempted_MissingEpoch(t *testing.T) {
+	e := newGangTestEnv(t)
+	_, _ = e.submitGang("train", 2, &store.ResourceSpec{VRAMMB: 8000})
+
+	// Use any existing job id; we expect the handler to reject on
+	// missing epoch before it even touches the store.
+	tasks := e.getGang(e.store.ListJobs(context.Background())[0].GangID)
+	r := httptest.NewRequest(http.MethodPost, "/jobs/"+tasks[0].ID+"/preempted", nil)
+	w := httptest.NewRecorder()
+	e.srv.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing epoch, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
