@@ -15,6 +15,7 @@ import (
 	"github.com/lrdinsu/workron/internal/metrics"
 	"github.com/lrdinsu/workron/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // gangTestEnv bundles a server, store, and helpers for gang integration tests.
@@ -163,10 +164,11 @@ func (e *gangTestEnv) runAdmission() {
 }
 
 // runCompleteDrainedPreemptions runs one pass of the reaper's drain-completion
-// logic: force-timeout + gang completion.
+// logic: force-timeout + gang completion. Uses the test server's metrics so
+// counters observed in tests reflect what this pass actually did.
 func (e *gangTestEnv) runCompleteDrainedPreemptions() {
 	e.t.Helper()
-	completeDrainedPreemptions(context.Background(), e.store, slog.Default())
+	completeDrainedPreemptions(context.Background(), e.store, slog.Default(), e.srv.metrics)
 }
 
 // --- Integration Tests ---
@@ -587,6 +589,50 @@ func TestGangIntegration_StuckGangRecovery(t *testing.T) {
 		if task.Status != store.StatusReserved {
 			t.Errorf("task %s status = %q, want reserved after re-admission", task.ID, task.Status)
 		}
+	}
+}
+
+// TestGangIntegration_PreemptionMetrics sanity-checks that the
+// preemption counters advance as a drain progresses through its
+// phases: drain-start bumps GangsPreempted; CompletePreemption bumps
+// GangPreemptionsCompleted{outcome="blocked"} and records the
+// drain-time histogram. Force-drain is not exercised here (a separate
+// force-timeout test covers it).
+func TestGangIntegration_PreemptionMetrics(t *testing.T) {
+	e := newGangTestEnv(t)
+
+	for i := 0; i < 3; i++ {
+		wid := "w" + string(rune('0'+i))
+		e.registerWorker(wid, "host:800"+string(rune('0'+i)), store.ResourceSpec{VRAMMB: 16000})
+	}
+	gangID, _ := e.submitGang("train", 3, &store.ResourceSpec{VRAMMB: 8000})
+	e.runAdmission()
+	tasks := e.getGang(gangID)
+	for _, task := range tasks {
+		e.claimJob(task.WorkerID)
+	}
+
+	before := testutil.ToFloat64(e.srv.metrics.GangsPreempted)
+	e.reportFail(tasks[0].ID)
+	after := testutil.ToFloat64(e.srv.metrics.GangsPreempted)
+	if after-before != 1 {
+		t.Errorf("GangsPreempted delta = %v, want 1", after-before)
+	}
+
+	// Drain + complete.
+	epoch := e.getGang(gangID)[0].PreemptionEpoch
+	for _, task := range tasks {
+		e.reportPreempted(task.ID, epoch)
+	}
+	e.runCompleteDrainedPreemptions()
+
+	blocked := testutil.ToFloat64(e.srv.metrics.GangPreemptionsCompleted.WithLabelValues("blocked"))
+	if blocked != 1 {
+		t.Errorf("GangPreemptionsCompleted{outcome=blocked} = %v, want 1", blocked)
+	}
+	failed := testutil.ToFloat64(e.srv.metrics.GangPreemptionsCompleted.WithLabelValues("failed"))
+	if failed != 0 {
+		t.Errorf("GangPreemptionsCompleted{outcome=failed} = %v, want 0", failed)
 	}
 }
 
