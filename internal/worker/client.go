@@ -193,6 +193,35 @@ func (c *SchedulerClient) SendHeartbeat(ctx context.Context, id string) (store.H
 	return result, nil
 }
 
+// SaveCheckpoint uploads opaque bytes to the scheduler for this job,
+// tagged with the current PreemptionEpoch. Only accepted while the
+// job is in preempting, a running-state save or a stale epoch is
+// rejected with 409. The next claim of this job surfaces these bytes
+// as CHECKPOINT_DATA (base64) in the job env.
+func (c *SchedulerClient) SaveCheckpoint(ctx context.Context, id string, epoch int, data []byte) error {
+	url := fmt.Sprintf("%s/jobs/%s/checkpoint?epoch=%d", c.baseURL, id, epoch)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("save checkpoint for job %s: %w", id, err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("save checkpoint for job %s: %w", id, err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Error("failed to close response body", "error", closeErr)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("save checkpoint for job %s: unexpected status %d", id, resp.StatusCode)
+	}
+	return nil
+}
+
 // ReportPreempted tells the scheduler that a preempted job's process
 // has exited. The epoch must match the PreemptionEpoch the scheduler
 // supplied on the preempt heartbeat response; a mismatch indicates a

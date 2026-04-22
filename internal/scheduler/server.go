@@ -2,7 +2,9 @@ package scheduler
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -98,6 +100,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /jobs/{id}/fail", s.handleJobFail)
 	s.mux.HandleFunc("POST /jobs/{id}/heartbeat", s.handleHeartbeat)
 	s.mux.HandleFunc("POST /jobs/{id}/preempted", s.handleJobPreempted)
+	s.mux.HandleFunc("POST /jobs/{id}/checkpoint", s.handleSaveCheckpoint)
+	s.mux.HandleFunc("GET /jobs/{id}/checkpoint", s.handleGetCheckpoint)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("POST /workers/register", s.handleRegisterWorker)
 	s.mux.HandleFunc("POST /workers/{id}/heartbeat", s.handleWorkerHeartbeat)
@@ -239,7 +243,7 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 	if workerID != "" && s.gangStore != nil {
 		job, found := s.gangStore.ClaimReservedJob(ctx, workerID)
 		if found {
-			job.Env = s.buildGangEnv(ctx, job)
+			job.Env = s.buildJobEnv(ctx, job)
 			s.metrics.JobsClaimed.Inc()
 			if job.StartedAt != nil {
 				s.metrics.JobQueueWait.Observe(job.StartedAt.Sub(job.CreatedAt).Seconds())
@@ -256,6 +260,7 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	job.Env = s.buildJobEnv(ctx, job)
 
 	s.metrics.JobsClaimed.Inc()
 	if job.StartedAt != nil {
@@ -265,17 +270,51 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, job)
 }
 
-// buildGangEnv constructs GANG_* environment variables for a gang task.
-// GANG_PEERS is a comma-separated list of worker ExecAddr values, ordered by gang_index.
-func (s *Server) buildGangEnv(ctx context.Context, job *store.Job) map[string]string {
-	env := map[string]string{
-		"GANG_ID":    job.GangID,
-		"GANG_SIZE":  strconv.Itoa(job.GangSize),
-		"GANG_INDEX": strconv.Itoa(job.GangIndex),
+// buildJobEnv constructs the env map handed to a newly claimed job.
+// It is called for both gang and non-gang claims so that a re-admitted
+// task (gang or otherwise) sees its previously saved checkpoint in
+// CHECKPOINT_DATA if any was stored. Gang-specific variables are
+// delegated to addGangEnv.
+//
+// Returns nil when there is nothing to inject, so the response stays
+// compact for the common case of a first-time claim.
+func (s *Server) buildJobEnv(ctx context.Context, job *store.Job) map[string]string {
+	var env map[string]string
+	ensure := func() {
+		if env == nil {
+			env = make(map[string]string, 4)
+		}
 	}
 
+	if job.GangID != "" {
+		ensure()
+		s.addGangEnv(ctx, env, job)
+	}
+
+	if len(job.Checkpoint) > 0 {
+		ensure()
+		// Base64 so arbitrary JSON bytes (including ones that wouldn't
+		// be well-formed as a raw env value) survive process environment
+		// transport. The job binary can decode on startup. Best-effort
+		// for demo-scale checkpoints; large artifacts should go through
+		// a side channel, not env vars.
+		env["CHECKPOINT_DATA"] = base64.StdEncoding.EncodeToString(job.Checkpoint)
+	}
+
+	return env
+}
+
+// addGangEnv populates GANG_ID, GANG_SIZE, GANG_INDEX, and GANG_PEERS
+// into env for a gang task. GANG_PEERS is a comma-separated list of
+// worker ExecAddr values ordered by gang_index, used by distributed
+// training frameworks for rendezvous.
+func (s *Server) addGangEnv(ctx context.Context, env map[string]string, job *store.Job) {
+	env["GANG_ID"] = job.GangID
+	env["GANG_SIZE"] = strconv.Itoa(job.GangSize)
+	env["GANG_INDEX"] = strconv.Itoa(job.GangIndex)
+
 	if s.workerStore == nil {
-		return env
+		return
 	}
 
 	// Build GANG_PEERS from sibling tasks' worker ExecAddrs
@@ -291,8 +330,6 @@ func (s *Server) buildGangEnv(ctx context.Context, job *store.Job) map[string]st
 		}
 	}
 	env["GANG_PEERS"] = strings.Join(peers, ",")
-
-	return env
 }
 
 // handleJobDone handles POST /jobs/{id}/done
@@ -486,6 +523,87 @@ func (s *Server) handleJobPreempted(w http.ResponseWriter, r *http.Request) {
 
 	logger.Info("job preempted", "job_id", id, "preemption_epoch", epoch)
 	w.WriteHeader(http.StatusOK)
+}
+
+// handleSaveCheckpoint handles POST /jobs/{id}/checkpoint?epoch=N
+// Worker uploads opaque checkpoint bytes while a preemption drain is
+// in flight. The body is stored verbatim on the job's Checkpoint
+// field and surfaced to the next claim as CHECKPOINT_DATA (base64).
+// The epoch must match PreemptionEpoch and the job must be in
+// preempting, otherwise 409.
+func (s *Server) handleSaveCheckpoint(w http.ResponseWriter, r *http.Request) {
+	logger := s.requestLogger(r.Context())
+	id := r.PathValue("id")
+	ctx := r.Context()
+
+	if s.gangStore == nil {
+		http.Error(w, "gang scheduling not supported", http.StatusNotImplemented)
+		return
+	}
+	if _, found := s.store.GetJob(ctx, id); !found {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	epochStr := r.URL.Query().Get("epoch")
+	if epochStr == "" {
+		http.Error(w, "epoch query parameter is required", http.StatusBadRequest)
+		return
+	}
+	epoch, err := strconv.Atoi(epochStr)
+	if err != nil {
+		http.Error(w, "epoch must be an integer", http.StatusBadRequest)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(body) == 0 {
+		http.Error(w, "checkpoint body is empty", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.gangStore.SaveCheckpoint(ctx, id, epoch, body); err != nil {
+		logger.Info("checkpoint rejected", "job_id", id, "preemption_epoch", epoch, "error", err)
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	logger.Info("checkpoint saved", "job_id", id, "preemption_epoch", epoch, "bytes", len(body))
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleGetCheckpoint handles GET /jobs/{id}/checkpoint
+// Returns the raw checkpoint bytes for a job (200), or 204 No Content
+// if no checkpoint has been stored. Primarily a debugging aid; the
+// normal injection path for workers is the CHECKPOINT_DATA env var
+// populated on claim by buildJobEnv.
+func (s *Server) handleGetCheckpoint(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	ctx := r.Context()
+
+	if s.gangStore == nil {
+		http.Error(w, "gang scheduling not supported", http.StatusNotImplemented)
+		return
+	}
+	if _, found := s.store.GetJob(ctx, id); !found {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	data, found := s.gangStore.GetCheckpoint(ctx, id)
+	if !found {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(data); err != nil {
+		s.logger.Error("write checkpoint body", "error", err)
+	}
 }
 
 // handleHealth handles GET /health
