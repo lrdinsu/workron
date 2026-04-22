@@ -3,6 +3,7 @@ package scheduler
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"github.com/lrdinsu/workron/internal/metrics"
 	"github.com/lrdinsu/workron/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // gangTestEnv bundles a server, store, and helpers for gang integration tests.
@@ -118,6 +120,26 @@ func (e *gangTestEnv) reportPreempted(jobID string, epoch int) {
 	}
 }
 
+// saveCheckpoint posts to POST /jobs/{id}/checkpoint?epoch=N with raw bytes
+// and returns the HTTP status code so callers can assert accept/reject cases.
+func (e *gangTestEnv) saveCheckpoint(jobID string, epoch int, data []byte) int {
+	e.t.Helper()
+	url := fmt.Sprintf("/jobs/%s/checkpoint?epoch=%d", jobID, epoch)
+	r := httptest.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	w := httptest.NewRecorder()
+	e.srv.ServeHTTP(w, r)
+	return w.Code
+}
+
+// getCheckpoint fetches GET /jobs/{id}/checkpoint and returns the body and status.
+func (e *gangTestEnv) getCheckpoint(jobID string) (int, []byte) {
+	e.t.Helper()
+	r := httptest.NewRequest(http.MethodGet, "/jobs/"+jobID+"/checkpoint", nil)
+	w := httptest.NewRecorder()
+	e.srv.ServeHTTP(w, r)
+	return w.Code, w.Body.Bytes()
+}
+
 // getGang calls GET /gangs/{gang_id} and returns the tasks.
 func (e *gangTestEnv) getGang(gangID string) []*store.Job {
 	e.t.Helper()
@@ -142,10 +164,11 @@ func (e *gangTestEnv) runAdmission() {
 }
 
 // runCompleteDrainedPreemptions runs one pass of the reaper's drain-completion
-// logic: force-timeout + gang completion.
+// logic: force-timeout + gang completion. Uses the test server's metrics so
+// counters observed in tests reflect what this pass actually did.
 func (e *gangTestEnv) runCompleteDrainedPreemptions() {
 	e.t.Helper()
-	completeDrainedPreemptions(context.Background(), e.store, slog.Default())
+	completeDrainedPreemptions(context.Background(), e.store, slog.Default(), e.srv.metrics)
 }
 
 // --- Integration Tests ---
@@ -566,6 +589,170 @@ func TestGangIntegration_StuckGangRecovery(t *testing.T) {
 		if task.Status != store.StatusReserved {
 			t.Errorf("task %s status = %q, want reserved after re-admission", task.ID, task.Status)
 		}
+	}
+}
+
+// TestGangIntegration_PreemptionMetrics sanity-checks that the
+// preemption counters advance as a drain progresses through its
+// phases: drain-start bumps GangsPreempted; CompletePreemption bumps
+// GangPreemptionsCompleted{outcome="blocked"} and records the
+// drain-time histogram. Force-drain is not exercised here (a separate
+// force-timeout test covers it).
+func TestGangIntegration_PreemptionMetrics(t *testing.T) {
+	e := newGangTestEnv(t)
+
+	for i := 0; i < 3; i++ {
+		wid := "w" + string(rune('0'+i))
+		e.registerWorker(wid, "host:800"+string(rune('0'+i)), store.ResourceSpec{VRAMMB: 16000})
+	}
+	gangID, _ := e.submitGang("train", 3, &store.ResourceSpec{VRAMMB: 8000})
+	e.runAdmission()
+	tasks := e.getGang(gangID)
+	for _, task := range tasks {
+		e.claimJob(task.WorkerID)
+	}
+
+	before := testutil.ToFloat64(e.srv.metrics.GangsPreempted)
+	e.reportFail(tasks[0].ID)
+	after := testutil.ToFloat64(e.srv.metrics.GangsPreempted)
+	if after-before != 1 {
+		t.Errorf("GangsPreempted delta = %v, want 1", after-before)
+	}
+
+	// Drain + complete.
+	epoch := e.getGang(gangID)[0].PreemptionEpoch
+	for _, task := range tasks {
+		e.reportPreempted(task.ID, epoch)
+	}
+	e.runCompleteDrainedPreemptions()
+
+	blocked := testutil.ToFloat64(e.srv.metrics.GangPreemptionsCompleted.WithLabelValues("blocked"))
+	if blocked != 1 {
+		t.Errorf("GangPreemptionsCompleted{outcome=blocked} = %v, want 1", blocked)
+	}
+	failed := testutil.ToFloat64(e.srv.metrics.GangPreemptionsCompleted.WithLabelValues("failed"))
+	if failed != 0 {
+		t.Errorf("GangPreemptionsCompleted{outcome=failed} = %v, want 0", failed)
+	}
+}
+
+// TestGangIntegration_CheckpointSaveAndReplay covers the checkpoint
+// round-trip: a job saves bytes during drain, the gang completes and
+// re-admits, and the re-claimed task sees the saved bytes surfaced as
+// CHECKPOINT_DATA (base64) in its env.
+func TestGangIntegration_CheckpointSaveAndReplay(t *testing.T) {
+	e := newGangTestEnv(t)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		wid := "w" + string(rune('0'+i))
+		e.registerWorker(wid, "host:800"+string(rune('0'+i)), store.ResourceSpec{VRAMMB: 16000})
+	}
+	gangID, _ := e.submitGang("train", 3, &store.ResourceSpec{VRAMMB: 8000})
+	e.runAdmission()
+	tasks := e.getGang(gangID)
+	for _, task := range tasks {
+		e.claimJob(task.WorkerID)
+	}
+
+	// Drain starts. Before workers ack, task 0 uploads a checkpoint.
+	e.reportFail(tasks[0].ID)
+	drained := e.getGang(gangID)
+	epoch := drained[0].PreemptionEpoch
+
+	checkpoint := []byte(`{"step":42,"loss":0.123}`)
+	if code := e.saveCheckpoint(tasks[0].ID, epoch, checkpoint); code != http.StatusOK {
+		t.Fatalf("SaveCheckpoint: got %d, want 200", code)
+	}
+
+	// GET should echo the bytes back. Compare semantically because the
+	// Postgres JSONB path canonicalizes whitespace (tested elsewhere);
+	// the memory backend preserves bytes exactly, which is what this
+	// integration test uses.
+	code, got := e.getCheckpoint(tasks[0].ID)
+	if code != http.StatusOK {
+		t.Fatalf("GetCheckpoint: got %d, want 200", code)
+	}
+	if string(got) != string(checkpoint) {
+		t.Errorf("GetCheckpoint body = %q, want %q", got, checkpoint)
+	}
+
+	// Finish drain and re-admit.
+	for _, task := range drained {
+		e.reportPreempted(task.ID, epoch)
+	}
+	e.runCompleteDrainedPreemptions()
+	e.runAdmission()
+
+	// Re-claim task 0 via its newly assigned worker. The env should
+	// carry CHECKPOINT_DATA containing the base64 encoding of the
+	// originally uploaded bytes. GANG_* values must still be present.
+	reReserved, _ := e.store.GetJob(ctx, tasks[0].ID)
+	if reReserved.Status != store.StatusReserved {
+		t.Fatalf("task 0 status = %q, want reserved after re-admission", reReserved.Status)
+	}
+	claimed := e.claimJob(reReserved.WorkerID)
+	if claimed == nil {
+		t.Fatal("re-claim: no job returned")
+	}
+	if claimed.ID != tasks[0].ID {
+		t.Fatalf("claimed ID = %q, want original task 0 %q", claimed.ID, tasks[0].ID)
+	}
+	raw, ok := claimed.Env["CHECKPOINT_DATA"]
+	if !ok {
+		t.Fatal("claimed job env missing CHECKPOINT_DATA")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatalf("decode CHECKPOINT_DATA: %v", err)
+	}
+	if string(decoded) != string(checkpoint) {
+		t.Errorf("decoded checkpoint = %q, want %q", decoded, checkpoint)
+	}
+	// Gang env is still populated for the re-claim.
+	if claimed.Env["GANG_ID"] != gangID {
+		t.Errorf("GANG_ID = %q, want %q", claimed.Env["GANG_ID"], gangID)
+	}
+}
+
+// TestHandleSaveCheckpoint_RejectsNonPreempting and
+// TestHandleSaveCheckpoint_RejectsWrongEpoch guard the checkpoint
+// semantics: saves are only valid while the job is in preempting and
+// must carry the current PreemptionEpoch.
+func TestHandleSaveCheckpoint_RejectsNonPreempting(t *testing.T) {
+	e := newGangTestEnv(t)
+	ctx := context.Background()
+
+	// A plain running job (not a gang), status is running, not preempting.
+	id := e.store.AddJob(ctx, store.AddJobParams{Command: "echo hi"})
+	e.claimJob("")
+
+	// 409 because status != preempting.
+	code := e.saveCheckpoint(id, 1, []byte(`{"step":1}`))
+	if code != http.StatusConflict {
+		t.Errorf("SaveCheckpoint on running job: got %d, want 409", code)
+	}
+}
+
+func TestHandleSaveCheckpoint_RejectsWrongEpoch(t *testing.T) {
+	e := newGangTestEnv(t)
+
+	for i := 0; i < 2; i++ {
+		wid := "w" + string(rune('0'+i))
+		e.registerWorker(wid, "host:800"+string(rune('0'+i)), store.ResourceSpec{VRAMMB: 16000})
+	}
+	gangID, _ := e.submitGang("train", 2, &store.ResourceSpec{VRAMMB: 8000})
+	e.runAdmission()
+	tasks := e.getGang(gangID)
+	for _, task := range tasks {
+		e.claimJob(task.WorkerID)
+	}
+	e.reportFail(tasks[0].ID)
+
+	// Stale epoch 999 must be rejected with 409.
+	code := e.saveCheckpoint(tasks[0].ID, 999, []byte(`{"step":1}`))
+	if code != http.StatusConflict {
+		t.Errorf("SaveCheckpoint with stale epoch: got %d, want 409", code)
 	}
 }
 

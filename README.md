@@ -14,7 +14,7 @@ Jobs are persisted to SQLite or PostgreSQL, so in-flight and completed work surv
 
 Workers register with the scheduler on startup, reporting their resource capacity (VRAM, memory) and execution address. Workers send periodic heartbeats while processing jobs. A background reaper on the scheduler detects stale job heartbeats and re-queues orphaned jobs, and marks workers with stale heartbeats as offline, ensuring no work is silently lost when a worker crashes.
 
-For distributed training and other multi-worker workloads, Workron supports gang scheduling: a single job request creates N coordinated tasks that must all be placed on suitable workers before any of them start. A background admission cycle reserves workers atomically, so tasks never start partially.
+For distributed training and other multi-worker workloads, Workron supports gang scheduling: a single job request creates N coordinated tasks that must all be placed on suitable workers before any of them start. A background admission cycle reserves workers atomically, so tasks never start partially. When one task fails or its worker dies mid-run, the scheduler enters coordinated drain: running siblings receive a preempt signal on their next heartbeat, send SIGTERM to their child processes, optionally upload a checkpoint, and acknowledge back. Once all in-flight tasks have drained, the gang returns to `blocked` atomically and is re-admitted on the next tick. No task is left running when its peers are already dead.
 
 If you are curious about the design decisions and trade-offs behind this project, I wrote about the journey here:
 
@@ -24,6 +24,7 @@ If you are curious about the design decisions and trade-offs behind this project
 - 📝 [Surviving the Crash: Adding SQLite Persistence Without Touching Business Logic](https://lrdinsu.github.io/posts/persisting-jobs-with-sqlite-workron/)
 - 📝 [DAG Dependencies: Teaching a Job Scheduler to Wait](https://lrdinsu.github.io/posts/dag-dependencies-workron/)
 - 📝 [Making the Invisible Visible: Structured Logging, Metrics, and Request Tracing](https://lrdinsu.github.io/posts/observability-slog-prometheus-workron/)
+- 📝 [All or Nothing: Gang Scheduling in Workron](https://lrdinsu.github.io/posts/gang-scheduling-workron/)
 
 
 ---
@@ -46,11 +47,11 @@ If you are curious about the design decisions and trade-offs behind this project
 - **Job resource requirements:** Jobs declare VRAM and memory needs, with priority and queue assignment
 - **Worker registration:** Workers register with resource capacity, execution address, and tags; stale workers marked offline automatically
 - **Gang scheduling:** Submit N coordinated tasks that all reserve workers atomically before any start; background admission cycle places largest gangs first with capacity accounting across running and reserved jobs; gang env vars (`GANG_ID`, `GANG_SIZE`, `GANG_INDEX`, `GANG_PEERS`) injected at claim time
-- **Checkpoint and output fields:** Jobs carry opaque JSON for checkpoint/resume and output tracking
+- **Gang preemption:** When one gang task fails while siblings run, the scheduler drains the whole gang — running siblings receive a preempt action on their next heartbeat, send SIGTERM with a grace window, then SIGKILL if needed. The gang returns to `blocked` atomically and is re-admitted. A 45-second timeout force-drains workers that stop heartbeating mid-drain. The trigger task keeps its claim-time retry increment; innocent siblings are refunded so preemption does not consume their retry budget.
+- **Checkpoint and resume:** Workers can `POST /jobs/{id}/checkpoint` opaque bytes while preempting. The scheduler surfaces them as `CHECKPOINT_DATA` (base64) in the job's env on the next claim, so re-admitted tasks can resume from their last saved state instead of starting over.
 
 **Planned — Scheduling Intelligence**
-- [ ] Gang preemption: interrupt running siblings when a gang task fails, roll back the whole gang atomically
-- [ ] Priority-based preemption with checkpoint/resume
+- [ ] Priority-based preemption across gangs and single jobs
 - [ ] Queue resource quotas with cross-queue borrowing
 
 **Planned — Execution Semantics**
@@ -86,12 +87,22 @@ Submit ──► blocked ──► reserved ──► running ──► done
              start       places all   pre-assigned
              blocked)    N at once)   task)
 
-Future (preemption):
+Gang preemption (a task fails while siblings run):
 
-            running ──► preempting ──► preempted
-                        (SIGTERM       (re-queued
-                         sent)          or gang
-                                        rolled back)
+running ──► preempting ──► preempted ──► blocked ──► (re-admitted)
+            (drain         (worker ack   (all siblings
+             started;       via POST      drained; gang
+             SIGTERM sent   /preempted,   returns to
+             via heartbeat  or reaper     admission pool)
+             response)      force-drains
+                            after 45s)
+                                    │
+                                    ▼
+                                  failed
+                                (if any sibling has
+                                 attempts >= max_retries
+                                 or is already done/failed
+                                 at drain completion)
 ```
 
 ### Standalone Mode
@@ -232,8 +243,11 @@ make stop-postgres
 | `GET` | `/jobs/{id}` | Get job status |
 | `GET` | `/jobs/next` | Claim next pending job; pass `?worker_id=` to also claim gang-reserved tasks for that worker |
 | `POST` | `/jobs/{id}/done` | Report job completed |
-| `POST` | `/jobs/{id}/fail` | Report job failed (scheduler decides retry vs permanent failure; propagates to gang siblings) |
-| `POST` | `/jobs/{id}/heartbeat` | Worker heartbeat for running job |
+| `POST` | `/jobs/{id}/fail` | Report job failed (scheduler decides retry vs permanent failure; triggers gang drain when siblings are running) |
+| `POST` | `/jobs/{id}/heartbeat` | Worker heartbeat for running or preempting job; response carries `{"action":"preempt","preemption_epoch":N}` when the scheduler wants the worker to stop |
+| `POST` | `/jobs/{id}/preempted` | Worker acknowledgement that a preempted process has exited (requires `?epoch=N` matching current `PreemptionEpoch`) |
+| `POST` | `/jobs/{id}/checkpoint` | Upload opaque checkpoint bytes for a preempting job (requires `?epoch=N`) |
+| `GET` | `/jobs/{id}/checkpoint` | Fetch last stored checkpoint bytes for a job (204 if none) |
 | `GET` | `/gangs/{gang_id}` | List all tasks belonging to a gang |
 | `POST` | `/workers/register` | Register a worker with resource capacity |
 | `POST` | `/workers/{id}/heartbeat` | Worker liveness heartbeat |
@@ -449,11 +463,33 @@ Distributed training jobs (PyTorch with NCCL, Jax on TPUs, and similar collectiv
   5. Atomically transitions each gang's tasks to `reserved`, one per worker, and subtracts the placed capacity before considering the next gang.
 - Workers claim their assigned task by passing `?worker_id=` to `GET /jobs/next`. The scheduler returns only tasks reserved for that specific worker.
 - At claim time, the scheduler injects `GANG_ID`, `GANG_SIZE`, `GANG_INDEX`, and `GANG_PEERS` environment variables into the job's env map, so worker processes can discover each other and form their communication ring.
-- When a gang task fails, `FailGang` propagates the failure to blocked, reserved, and pending siblings. Running and done siblings are left untouched and are expected to fail on their own through peer detection or heartbeat timeout.
+- When a gang task fails while any sibling is still running, `PreemptGang` enters coordinated drain (see the [Gang Preemption](#gang-preemption) section below). When all siblings are already blocked/reserved/pending, the legacy `FailGang` path propagates the failure to those siblings directly.
 
 **Multi-instance safety:** the admission cycle uses a separate PostgreSQL advisory lock (different lock ID from the reaper), so only one scheduler instance runs placement at a time. The two coordination loops never block each other.
 
-**Known limitation:** if some gang tasks start running and another task's worker dies before claiming, the stale reservation is rolled back but the already-running siblings are not preempted. The gang ends up with two running tasks and one blocked task, which does not qualify for re-placement. Active preemption of running siblings is planned for a future PR.
+---
+
+## Gang Preemption
+
+A gang task failing or its worker dying mid-run used to leave siblings running forever, with no path back to a re-admissible state. Preemption closes that gap by draining the whole gang as a unit.
+
+**How it works:**
+
+- `POST /jobs/{id}/fail` on a gang task (or the reaper detecting a stale heartbeat) calls `PreemptGang(gangID, triggerJobID)`. Under one transaction:
+  - Every `running` sibling moves to `preempting`, with a bumped `PreemptionEpoch` and a `DrainStartedAt` timestamp. The trigger task keeps its claim-time `Attempts` increment (real failure); innocent siblings have `Attempts` decremented by 1 so scheduler-driven preemption does not burn their retry budget.
+  - Reserved and pending siblings skip `preempting` and go straight to `blocked` — they have no running process to signal.
+  - Blocked siblings stay blocked.
+- Each worker's next heartbeat returns JSON `{"action":"preempt","preemption_epoch":N}`. The worker signals its child with SIGTERM and waits up to 15 seconds for a clean exit; if the process ignores SIGTERM, the executor escalates to SIGKILL.
+- Workers can optionally `POST /jobs/{id}/checkpoint?epoch=N` with opaque bytes while still in `preempting`. The payload is stored on the job row and surfaced as `CHECKPOINT_DATA` (base64) in the env map on the next claim.
+- After its process exits, the worker calls `POST /jobs/{id}/preempted?epoch=N`. The scheduler validates the epoch, transitions the task from `preempting` to `preempted`, and the worker moves on.
+- A reaper pass finishes each drain:
+  1. Any task stuck in `preempting` past 45 seconds (the grace window plus slack) is force-drained by calling `ForceDrainPreempting`. This covers workers that die mid-drain and will never ack.
+  2. For every gang with no task still in `running` or `preempting`, `CompletePreemption` normalizes the verdict: gang goes to `blocked` if retries remain, or `failed` if any task has `Attempts >= MaxRetries` or is already `done`/`failed` (partial completion cannot cleanly restart-all).
+- A gang returned to `blocked` is picked up by the next admission tick and re-placed on fresh workers.
+
+**The failure case that used to be stuck:** a gang of three is reserved on workers A/B/C; A and B claim and start running; C dies before claiming. Before preemption, tasks 1 and 2 ran forever waiting for a peer that never joined. Now task 0's worker failure triggers the full drain, tasks 1 and 2 receive the preempt signal on their next heartbeat and exit cleanly, and the gang is re-admitted with three fresh worker assignments.
+
+**Why not just send a cancel RPC:** heartbeats already exist, workers already poll every 5 seconds, and reusing the channel keeps the worker binary behind one firewall-traversal direction. The 5-second heartbeat cadence is well inside the 15-second SIGTERM grace window, so the worker learns about preemption within one full heartbeat and the executor still has time to let the child exit cleanly before the hard-kill fallback.
 
 ---
 
@@ -477,7 +513,7 @@ Workron provides three layers of observability:
 
 **Structured logging** (`log/slog`): all log output is JSON with typed fields (`job_id`, `worker_id`, `request_id`, `attempt`, `error`). Log levels distinguish normal events (Info), unusual events like reaper actions (Warn), and failures (Error). Each component receives its logger via dependency injection. Workers use `logger.With("worker_id", id)` so every log line automatically identifies the worker.
 
-**Prometheus metrics** (`GET /metrics`): counters track job lifecycle events (`workron_jobs_submitted_total`, `workron_jobs_claimed_total`, `workron_jobs_completed_total`, `workron_jobs_failed_total`, `workron_jobs_retried_total`, `workron_jobs_reaped_total`). Histograms track execution duration and queue wait time. Gauges report current queue state (`workron_jobs_pending`, `workron_jobs_running`, `workron_jobs_blocked`) via a custom `prometheus.Collector` that queries the store on each scrape.  The `workron_reaper_leader` gauge indicates whether this instance is the active reaper leader (1) or a follower (0), useful for monitoring multi-scheduler deployments.
+**Prometheus metrics** (`GET /metrics`): counters track job lifecycle events (`workron_jobs_submitted_total`, `workron_jobs_claimed_total`, `workron_jobs_completed_total`, `workron_jobs_failed_total`, `workron_jobs_retried_total`, `workron_jobs_reaped_total`). Gang preemption has its own counters (`workron_gangs_preempted_total`, `workron_gang_preemptions_force_drained_total`, `workron_gang_preemptions_completed_total{outcome="blocked"|"failed"}`) and a histogram (`workron_gang_preemption_drain_seconds`) that tracks drain-start to completion latency. Histograms also track execution duration and queue wait time. Gauges report current queue state (`workron_jobs_pending`, `workron_jobs_running`, `workron_jobs_blocked`) via a custom `prometheus.Collector` that queries the store on each scrape. The `workron_reaper_leader` gauge indicates whether this instance is the active reaper leader (1) or a follower (0), useful for monitoring multi-scheduler deployments.
 
 **Request ID tracing**: every HTTP request receives a UUID, set as the `X-Request-ID` response header and included in all log lines for that request. A request-scoped child logger is created in `ServeHTTP` and propagated to handlers via context, so `request_id` appears automatically without manual threading.
 
