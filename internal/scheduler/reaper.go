@@ -48,7 +48,7 @@ func StartReaper(ctx context.Context, s store.JobStore, logger *slog.Logger, m *
 func runReaperTick(ctx context.Context, s store.JobStore, logger *slog.Logger, m *metrics.Metrics) {
 	doReap := func(ctx context.Context) {
 		reap(ctx, s, logger, m)
-		completeDrainedPreemptions(ctx, s, logger)
+		completeDrainedPreemptions(ctx, s, logger, m)
 		s.UnblockReady(ctx)
 
 		// Mark workers with stale heartbeats as offline.
@@ -117,6 +117,7 @@ func reap(ctx context.Context, s store.JobStore, logger *slog.Logger, m *metrics
 					"transitioned", res.Transitioned,
 				)
 				m.JobsReaped.WithLabelValues("requeued").Inc()
+				m.GangsPreempted.Inc()
 				continue
 			}
 		}
@@ -159,7 +160,7 @@ func reap(ctx context.Context, s store.JobStore, logger *slog.Logger, m *metrics
 //     partial completion encountered).
 //
 // No-op when the backing store does not implement GangStore.
-func completeDrainedPreemptions(ctx context.Context, s store.JobStore, logger *slog.Logger) {
+func completeDrainedPreemptions(ctx context.Context, s store.JobStore, logger *slog.Logger, m *metrics.Metrics) {
 	gs, ok := s.(store.GangStore)
 	if !ok {
 		return
@@ -190,6 +191,7 @@ func completeDrainedPreemptions(ctx context.Context, s store.JobStore, logger *s
 			)
 			continue
 		}
+		m.GangPreemptionsForceDrained.Inc()
 		logger.Warn("force-drained stuck preempting task",
 			"job_id", job.ID,
 			"gang_id", job.GangID,
@@ -200,11 +202,14 @@ func completeDrainedPreemptions(ctx context.Context, s store.JobStore, logger *s
 
 	// Pass 2: complete drained gangs.
 	// Re-list because pass 1 may have moved tasks from preempting to
-	// preempted, changing completion eligibility.
+	// preempted, changing completion eligibility. Also capture a representative
+	// drain-start timestamp for the completion histogram. CompletePreemption
+	// clears DrainStartedAt, so we must read it before calling it.
 	type gangState struct {
-		hasDrained  bool // any task preempting or preempted
-		hasInFlight bool // any task running or preempting
-		epoch       int  // representative drain-round epoch for logging
+		hasDrained  bool      // any task preempting or preempted
+		hasInFlight bool      // any task running or preempting
+		epoch       int       // representative drain-round epoch for logging
+		drainStart  time.Time // earliest DrainStartedAt across drained tasks
 	}
 	gangs := make(map[string]*gangState)
 	for _, job := range s.ListJobs(ctx) {
@@ -223,10 +228,16 @@ func completeDrainedPreemptions(ctx context.Context, s store.JobStore, logger *s
 			if job.PreemptionEpoch > st.epoch {
 				st.epoch = job.PreemptionEpoch
 			}
+			if job.DrainStartedAt != nil && (st.drainStart.IsZero() || job.DrainStartedAt.Before(st.drainStart)) {
+				st.drainStart = *job.DrainStartedAt
+			}
 		case store.StatusPreempted:
 			st.hasDrained = true
 			if job.PreemptionEpoch > st.epoch {
 				st.epoch = job.PreemptionEpoch
+			}
+			if job.DrainStartedAt != nil && (st.drainStart.IsZero() || job.DrainStartedAt.Before(st.drainStart)) {
+				st.drainStart = *job.DrainStartedAt
 			}
 		case store.StatusRunning:
 			st.hasInFlight = true
@@ -258,6 +269,10 @@ func completeDrainedPreemptions(ctx context.Context, s store.JobStore, logger *s
 				outcome = "failed"
 				break
 			}
+		}
+		m.GangPreemptionsCompleted.WithLabelValues(outcome).Inc()
+		if !st.drainStart.IsZero() {
+			m.GangPreemptionDrainTime.Observe(now.Sub(st.drainStart).Seconds())
 		}
 		logger.Info("gang drain completed",
 			"gang_id", gangID,

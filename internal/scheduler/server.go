@@ -404,6 +404,7 @@ func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 				"transitioned", res.Transitioned,
 			)
 			s.metrics.JobsRetried.Inc()
+			s.metrics.GangsPreempted.Inc()
 			w.WriteHeader(http.StatusOK)
 			return
 		}
