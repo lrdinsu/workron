@@ -97,6 +97,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /jobs/{id}/done", s.handleJobDone)
 	s.mux.HandleFunc("POST /jobs/{id}/fail", s.handleJobFail)
 	s.mux.HandleFunc("POST /jobs/{id}/heartbeat", s.handleHeartbeat)
+	s.mux.HandleFunc("POST /jobs/{id}/preempted", s.handleJobPreempted)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("POST /workers/register", s.handleRegisterWorker)
 	s.mux.HandleFunc("POST /workers/{id}/heartbeat", s.handleWorkerHeartbeat)
@@ -400,8 +401,22 @@ func (s *Server) handleJobFail(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// heartbeatResponse is the JSON body returned when the scheduler wants the
+// worker to take an action on its next heartbeat. For ordinary running
+// jobs the body is empty (back-compat with clients that do not decode it).
+// For preempting jobs the body carries action="preempt" and the
+// PreemptionEpoch the worker should echo back when it calls
+// /jobs/{id}/preempted after its process exits.
+type heartbeatResponse struct {
+	Action          string `json:"action"`
+	PreemptionEpoch int    `json:"preemption_epoch,omitempty"`
+}
+
 // handleHeartbeat handles POST /jobs/{id}/heartbeat
 // Worker signals it is still alive and working on this job.
+// Accepts heartbeats from both running and preempting jobs: a preempting
+// job's worker still needs to heartbeat until its process exits, and
+// the response body is how the scheduler tells it to stop.
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ctx := r.Context()
@@ -412,12 +427,64 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if job.Status != store.StatusRunning {
+	if job.Status != store.StatusRunning && job.Status != store.StatusPreempting {
 		http.Error(w, "job is not running", http.StatusConflict)
 		return
 	}
 
 	s.store.UpdateHeartbeat(ctx, id)
+
+	if job.Status == store.StatusPreempting {
+		s.writeJSON(w, http.StatusOK, heartbeatResponse{
+			Action:          "preempt",
+			PreemptionEpoch: job.PreemptionEpoch,
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleJobPreempted handles POST /jobs/{id}/preempted?epoch=N
+// Worker acknowledgement that a preempted job's process has exited.
+// The epoch must match the job's current PreemptionEpoch, a stale
+// epoch is rejected with 409 so a late ack from an earlier drain
+// round doesn't flip a newly-reserved task back to preempted.
+func (s *Server) handleJobPreempted(w http.ResponseWriter, r *http.Request) {
+	logger := s.requestLogger(r.Context())
+	id := r.PathValue("id")
+	ctx := r.Context()
+
+	if s.gangStore == nil {
+		http.Error(w, "gang scheduling not supported", http.StatusNotImplemented)
+		return
+	}
+
+	if _, found := s.store.GetJob(ctx, id); !found {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	epochStr := r.URL.Query().Get("epoch")
+	if epochStr == "" {
+		http.Error(w, "epoch query parameter is required", http.StatusBadRequest)
+		return
+	}
+	epoch, err := strconv.Atoi(epochStr)
+	if err != nil {
+		http.Error(w, "epoch must be an integer", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.gangStore.MarkPreempted(ctx, id, epoch); err != nil {
+		// Either the job is not in preempting or the epoch doesn't
+		// match. Either way the worker's ack cannot be applied cleanly.
+		logger.Info("preempt ack rejected", "job_id", id, "preemption_epoch", epoch, "error", err)
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	logger.Info("job preempted", "job_id", id, "preemption_epoch", epoch)
 	w.WriteHeader(http.StatusOK)
 }
 

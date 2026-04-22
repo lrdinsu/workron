@@ -143,12 +143,15 @@ func TestSchedulerClient_SendHeartbeat(t *testing.T) {
 	id := s.AddJob(ctx, store.AddJobParams{Command: "echo hello"})
 	s.ClaimJob(ctx) // move to running
 
-	action, err := client.SendHeartbeat(ctx, id)
+	res, err := client.SendHeartbeat(ctx, id)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if action != "" {
-		t.Errorf("expected empty action, got %q", action)
+	if res.Action != "" {
+		t.Errorf("expected empty action, got %q", res.Action)
+	}
+	if res.PreemptionEpoch != 0 {
+		t.Errorf("expected preemption_epoch 0, got %d", res.PreemptionEpoch)
 	}
 
 	job, _ := s.GetJob(ctx, id)

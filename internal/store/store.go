@@ -18,8 +18,18 @@ type JobStore interface {
 	ListRunningJobs(ctx context.Context) []*Job
 	UpdateJobStatus(ctx context.Context, id string, status JobStatus)
 	UpdateHeartbeat(ctx context.Context, id string)
-	SendHeartbeat(ctx context.Context, id string) (string, error)
+	SendHeartbeat(ctx context.Context, id string) (HeartbeatResult, error)
 	UnblockReady(ctx context.Context)
+}
+
+// HeartbeatResult carries any action the scheduler wants the worker to
+// take in response to a heartbeat. For an ordinary running job the zero
+// value is returned (Action is empty). When a job is in preempting,
+// Action is "preempt" and PreemptionEpoch is the round epoch the worker
+// must echo back to /jobs/{id}/preempted when its process exits.
+type HeartbeatResult struct {
+	Action          string
+	PreemptionEpoch int
 }
 
 // JobStatus defines the valid states for a job
