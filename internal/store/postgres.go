@@ -243,12 +243,15 @@ func (s *PostgresStore) SendHeartbeat(ctx context.Context, id string) (Heartbeat
 }
 
 // UnblockReady transitions blocked jobs to pending when all their
-// dependencies have completed. Uses jsonb_array_elements_text to check
-// each element of the depends_on JSONB array against the jobs table.
+// dependencies have completed. Gang tasks (gang_id != ”) are excluded,
+// they sit in blocked waiting for the admission cycle, not for DAG
+// completion, and flipping them to pending would break all-or-nothing
+// placement.
 func (s *PostgresStore) UnblockReady(ctx context.Context) {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE jobs SET status = 'pending'
 		WHERE status = 'blocked'
+		AND (gang_id IS NULL OR gang_id = '')
 		AND NOT EXISTS (
 			SELECT 1 FROM jsonb_array_elements_text(jobs.depends_on) AS dep
 			WHERE dep NOT IN (SELECT id FROM jobs WHERE status = 'done')

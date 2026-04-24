@@ -218,12 +218,15 @@ func (s *SQLiteStore) SendHeartbeat(ctx context.Context, id string) (HeartbeatRe
 }
 
 // UnblockReady transitions blocked jobs to pending when all their
-// dependencies have completed. Uses json_each to check each element
-// of the depends_on JSON array against the jobs table.
+// dependencies have completed. Gang tasks (gang_id != ”) are excluded,
+// they sit in blocked waiting for the admission cycle, not for DAG
+// completion, and flipping them to pending would break all-or-nothing
+// placement.
 func (s *SQLiteStore) UnblockReady(ctx context.Context) {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE jobs SET status = 'pending'
 		WHERE status = 'blocked'
+		AND (gang_id IS NULL OR gang_id = '')
 		AND NOT EXISTS (
 			SELECT 1 FROM json_each(jobs.depends_on) AS dep
 			WHERE dep.value NOT IN (SELECT id FROM jobs WHERE status = 'done')
@@ -741,7 +744,7 @@ func (s *SQLiteStore) PreemptGang(ctx context.Context, gangID string, triggerJob
 		return PreemptGangResult{}, fmt.Errorf("sqlite: preempt reserved: %w", err)
 	}
 
-	// pending-> blocked
+	// pending -> blocked
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE jobs SET status = 'blocked' WHERE gang_id = ? AND status = 'pending'`, gangID,
 	); err != nil {

@@ -159,12 +159,22 @@ func (s *MemoryStore) SendHeartbeat(ctx context.Context, id string) (HeartbeatRe
 // UnblockReady transitions blocked jobs to pending when all their
 // dependencies have completed. A job is unblocked only if every ID
 // in its DependsOn list has status done.
+//
+// Gang tasks are skipped: a gang task sits in blocked not because of DAG
+// dependencies but because it is waiting for coordinated admission by
+// RunGangAdmissionOnce. Unblocking it here would flip it to pending and
+// break the gang's all-or-nothing placement semantics. Those tasks are
+// released only by ReserveGang (blocked -> reserved) or by
+// CompletePreemption (preempted -> blocked -> re-admission).
 func (s *MemoryStore) UnblockReady(_ context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for _, job := range s.jobs {
 		if job.Status != StatusBlocked {
+			continue
+		}
+		if job.GangID != "" {
 			continue
 		}
 
