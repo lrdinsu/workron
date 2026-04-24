@@ -256,6 +256,10 @@ func TestMemory_CompletePreemptionPartialCompletion(t *testing.T) {
 	testCompletePreemptionPartialCompletion(t, newTestMemoryGangJobStore)
 }
 
+func TestMemory_UnblockReadyIgnoresGangTasks(t *testing.T) {
+	testUnblockReadyIgnoresGangTasks(t, newTestMemoryGangJobStore)
+}
+
 func TestMemory_SaveCheckpointEpochGuard(t *testing.T) {
 	testSaveCheckpointEpochGuard(t, newTestMemoryGangJobStore)
 }

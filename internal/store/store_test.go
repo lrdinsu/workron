@@ -548,6 +548,31 @@ func testUnblockReadyChain(t *testing.T, factory StoreFactory) {
 	}
 }
 
+// testUnblockReadyIgnoresGangTasks guards a subtle race: a gang task is
+// created with status=blocked and empty depends_on, which looks to
+// UnblockReady like "no unmet deps, promote to pending." Promoting it
+// would break the gang's all-or-nothing placement because ReserveGang
+// requires all tasks to still be blocked. Gang tasks are released by
+// the admission cycle, not by DAG-completion checks.
+func testUnblockReadyIgnoresGangTasks(t *testing.T, factory GangJobStoreFactory) {
+	t.Helper()
+	s := factory(t)
+	ctx := context.Background()
+
+	_, taskIDs := s.AddGang(ctx, AddJobParams{Command: "train", GangSize: 3})
+
+	// Reaper's first pass would fire UnblockReady. A gang task with
+	// empty depends_on must not be promoted.
+	s.UnblockReady(ctx)
+
+	for _, id := range taskIDs {
+		job, _ := s.GetJob(ctx, id)
+		if job.Status != StatusBlocked {
+			t.Errorf("gang task %s status = %q, want blocked (UnblockReady should skip gang tasks)", id, job.Status)
+		}
+	}
+}
+
 func testUnblockReadyIgnoresNonBlocked(t *testing.T, factory StoreFactory) {
 	t.Helper()
 	s := factory(t)

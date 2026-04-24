@@ -335,6 +335,10 @@ func TestSQLite_CompletePreemptionPartialCompletion(t *testing.T) {
 	testCompletePreemptionPartialCompletion(t, newTestSQLiteGangJobStore)
 }
 
+func TestSQLite_UnblockReadyIgnoresGangTasks(t *testing.T) {
+	testUnblockReadyIgnoresGangTasks(t, newTestSQLiteGangJobStore)
+}
+
 func TestSQLite_SaveCheckpointEpochGuard(t *testing.T) {
 	testSaveCheckpointEpochGuard(t, newTestSQLiteGangJobStore)
 }

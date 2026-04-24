@@ -432,6 +432,10 @@ func TestPostgres_CompletePreemptionPartialCompletion(t *testing.T) {
 	testCompletePreemptionPartialCompletion(t, newTestPostgresGangJobStore)
 }
 
+func TestPostgres_UnblockReadyIgnoresGangTasks(t *testing.T) {
+	testUnblockReadyIgnoresGangTasks(t, newTestPostgresGangJobStore)
+}
+
 func TestPostgres_SaveCheckpointEpochGuard(t *testing.T) {
 	testSaveCheckpointEpochGuard(t, newTestPostgresGangJobStore)
 }
