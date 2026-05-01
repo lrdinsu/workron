@@ -60,6 +60,11 @@ func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
+// Ping verifies the database file is open and reachable.
+func (s *SQLiteStore) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
 func migrate(db *sql.DB) error {
 	jobsSchema := `
 	CREATE TABLE IF NOT EXISTS jobs (

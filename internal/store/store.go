@@ -133,6 +133,13 @@ type GangAdmissionLocker interface {
 	WithGangAdmissionLock(ctx context.Context, fn func(ctx context.Context)) (acquired bool, err error)
 }
 
+// Pinger is an optional interface for verifying live connectivity to the
+// underlying storage backend. Discovered via type assertion. Stores that
+// don't implement it (MemoryStore) are treated as always reachable.
+type Pinger interface {
+	Ping(ctx context.Context) error
+}
+
 // WorkerStore defines operations for managing worker nodes.
 // Like ReaperLocker, this is an optional interface discovered via type assertion.
 // All three store backends (Memory, SQLite, Postgres) implement it.
