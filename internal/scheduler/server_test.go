@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -879,3 +880,92 @@ func TestHandleListWorkers_WithWorkers(t *testing.T) {
 		t.Errorf("expected 2 workers, got %d", len(workers))
 	}
 }
+
+// pingableStore wraps a MemoryStore and adds a configurable Ping result so
+// the readiness handler can be exercised against both healthy and unhealthy
+// backends without spinning up a real database.
+type pingableStore struct {
+	*store.MemoryStore
+	err error
+}
+
+func (p *pingableStore) Ping(ctx context.Context) error { return p.err }
+
+func TestHandleHealthz_AlwaysOK(t *testing.T) {
+	srv := newTestServer()
+
+	r := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestHandleReadyz_StoreWithoutPinger(t *testing.T) {
+	// MemoryStore does not implement Pinger; readiness should return 200.
+	srv := newTestServer()
+
+	r := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestHandleReadyz_PingSucceeds(t *testing.T) {
+	ps := &pingableStore{MemoryStore: store.NewMemoryStore()}
+	srv := NewServer(ps, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
+
+	r := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestHandleReadyz_PingFails(t *testing.T) {
+	ps := &pingableStore{MemoryStore: store.NewMemoryStore(), err: errPingFailed}
+	srv := NewServer(ps, slog.Default(), metrics.NewMetrics(), prometheus.NewRegistry(), "test-inst")
+
+	r := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestHandleHealth_StillReturnsRichBody(t *testing.T) {
+	// /health must remain unchanged: returns instance_id, uptime, status.
+	srv := newTestServer()
+
+	r := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, key := range []string{"instance_id", "uptime", "status"} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("expected %q in /health response, got %v", key, body)
+		}
+	}
+	if body["status"] != "ok" {
+		t.Errorf("status = %q, want %q", body["status"], "ok")
+	}
+}
+
+var errPingFailed = errors.New("ping failed")

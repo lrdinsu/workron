@@ -103,6 +103,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /jobs/{id}/checkpoint", s.handleSaveCheckpoint)
 	s.mux.HandleFunc("GET /jobs/{id}/checkpoint", s.handleGetCheckpoint)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.HandleFunc("POST /workers/register", s.handleRegisterWorker)
 	s.mux.HandleFunc("POST /workers/{id}/heartbeat", s.handleWorkerHeartbeat)
 	s.mux.HandleFunc("GET /workers", s.handleListWorkers)
@@ -616,6 +618,33 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"uptime":      time.Since(s.startTime).Round(time.Second).String(),
 		"status":      "ok",
 	})
+}
+
+// handleHealthz handles GET /healthz, the Kubernetes liveness probe target.
+// Returns 200 unconditionally as long as the HTTP server is serving requests.
+// Storage connectivity is intentionally excluded, a transient Postgres outage
+// should remove the pod from the Service, not restart it.
+func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleReadyz handles GET /readyz, the Kubernetes readiness probe target.
+// Pings the underlying store with a 1-second budget if it implements Pinger.
+// Stores that don't implement Pinger (e.g. MemoryStore) are treated as ready.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	pinger, ok := s.store.(store.Pinger)
+	if !ok {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+	defer cancel()
+	if err := pinger.Ping(ctx); err != nil {
+		s.requestLogger(r.Context()).Warn("readiness ping failed", "error", err)
+		http.Error(w, "store unreachable", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // --- Worker endpoints ---
