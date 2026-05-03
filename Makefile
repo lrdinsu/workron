@@ -4,7 +4,8 @@ export
 .PHONY: build test test-v test-race test-postgres clean \
        run-scheduler run-scheduler-sqlite run-scheduler-postgres \
        run-standalone run-standalone-sqlite run-standalone-postgres \
-       run-worker run-postgres stop-postgres
+       run-worker run-postgres stop-postgres \
+       k8s-up k8s-down k8s-logs k8s-demo k8s-build k8s-load
 
 # ---------- Build ----------
 build:
@@ -78,6 +79,52 @@ run-postgres:
 # Stop local PostgreSQL
 stop-postgres:
 	docker compose down
+
+# ---------- Kubernetes (kind) ----------
+
+KIND_CLUSTER ?= workron
+SCHEDULER_IMAGE ?= workron-scheduler:dev
+WORKER_IMAGE ?= workron-worker:dev
+
+# Build both container images from the local source tree.
+k8s-build:
+	docker build -f cmd/scheduler/Dockerfile -t $(SCHEDULER_IMAGE) .
+	docker build -f cmd/worker/Dockerfile -t $(WORKER_IMAGE) .
+
+# Load locally-built images into the kind node so kubelet can pull them
+# without a registry (paired with imagePullPolicy: IfNotPresent).
+k8s-load:
+	kind load docker-image $(SCHEDULER_IMAGE) $(WORKER_IMAGE) --name $(KIND_CLUSTER)
+
+# Bring up the full stack: cluster + images + manifests, then wait for
+# every workload to become Ready before returning. Idempotent enough to
+# re-run after a code change followed by `make k8s-build && make k8s-load`,
+# though for a clean slate prefer `make k8s-down && make k8s-up`.
+k8s-up:
+	kind create cluster --name $(KIND_CLUSTER) --config deploy/kind-config.yaml
+	$(MAKE) k8s-build
+	$(MAKE) k8s-load
+	kubectl apply -k deploy/k8s/overlays/local
+	kubectl -n workron rollout status statefulset/workron-postgres --timeout=180s
+	kubectl -n workron wait --for=condition=ready pod -l app=workron-postgres --timeout=180s
+	kubectl -n workron rollout status deployment/workron-scheduler --timeout=180s
+	kubectl -n workron wait --for=condition=ready pod -l app=workron-scheduler --timeout=180s
+	kubectl -n workron rollout status deployment/workron-worker --timeout=180s
+	kubectl -n workron wait --for=condition=ready pod -l app=workron-worker --timeout=180s
+	@echo
+	@echo "Workron is up. Try: curl http://localhost:30080/healthz"
+
+# Tear down the kind cluster entirely (removes the local PV with it).
+k8s-down:
+	kind delete cluster --name $(KIND_CLUSTER)
+
+# Tail logs from both scheduler replicas concurrently.
+k8s-logs:
+	kubectl -n workron logs -l app=workron-scheduler -f --max-log-requests=10
+
+# End-to-end gang-preemption demo against the in-cluster API.
+k8s-demo:
+	bash scripts/k8s-demo.sh
 
 # ---------- Clean ----------
 
