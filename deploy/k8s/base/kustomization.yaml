@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: workron
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: workron
+
+resources:
+  - namespace.yaml
+  - postgres-secret.yaml
+  - postgres-service.yaml
+  - postgres-statefulset.yaml
+  - scheduler-configmap.yaml
+  - scheduler-deployment.yaml
+  - worker-configmap.yaml
+  - worker-deployment.yaml

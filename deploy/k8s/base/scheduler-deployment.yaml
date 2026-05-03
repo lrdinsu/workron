@@ -1,0 +1,90 @@
+# Scheduler runs as 2 replicas to exercise the Postgres advisory-lock
+# coordination path (only one replica may hold the reaper / gang-admission
+# lock per tick). Schema migrations are idempotent and run inside
+# NewPostgresStore *before* the HTTP server begins serving, so no init
+# container or Job is required to bootstrap the schema; /readyz then
+# verifies ongoing DB reachability.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workron-scheduler
+  labels:
+    app: workron-scheduler
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: workron-scheduler
+  template:
+    metadata:
+      labels:
+        app: workron-scheduler
+    spec:
+      containers:
+        - name: scheduler
+          image: workron-scheduler:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: WORKRON_PG_URL
+              valueFrom:
+                secretKeyRef:
+                  name: workron-postgres
+                  key: database-url
+            - name: WORKRON_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: workron-scheduler-config
+                  key: port
+            - name: WORKRON_DB_DRIVER
+              valueFrom:
+                configMapKeyRef:
+                  name: workron-scheduler-config
+                  key: db-driver
+          # The current binary takes CLI flags, not env vars. Kubernetes
+          # substitutes $(VAR) from `env` before exec, so we pass the
+          # Secret/ConfigMap values to flags without changing Go code.
+          args:
+            - "--mode=scheduler"
+            - "--port=$(WORKRON_PORT)"
+            - "--db-driver=$(WORKRON_DB_DRIVER)"
+            - "--db-url=$(WORKRON_PG_URL)"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+---
+# In-cluster Service used by workers to reach the scheduler API. Overlays
+# may add a NodePort Service alongside this for host-level access.
+apiVersion: v1
+kind: Service
+metadata:
+  name: workron-scheduler
+  labels:
+    app: workron-scheduler
+spec:
+  selector:
+    app: workron-scheduler
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

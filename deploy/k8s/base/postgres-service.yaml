@@ -1,0 +1,34 @@
+# Headless Service used by the StatefulSet for stable per-pod DNS
+# (workron-postgres-0.workron-postgres-headless...). Required by the
+# StatefulSet `serviceName` contract.
+apiVersion: v1
+kind: Service
+metadata:
+  name: workron-postgres-headless
+  labels:
+    app: workron-postgres
+spec:
+  clusterIP: None
+  selector:
+    app: workron-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+
+---
+# Regular ClusterIP Service for clients (scheduler) that just want any
+# healthy Postgres pod by hostname.
+apiVersion: v1
+kind: Service
+metadata:
+  name: workron-postgres
+  labels:
+    app: workron-postgres
+spec:
+  selector:
+    app: workron-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432

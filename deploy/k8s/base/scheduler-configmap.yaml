@@ -1,0 +1,10 @@
+# Non-sensitive scheduler config. The Postgres DSN lives in the
+# workron-postgres Secret; this ConfigMap holds only the values that are
+# safe to log or reveal.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workron-scheduler-config
+data:
+  port: "8080"
+  db-driver: postgres
