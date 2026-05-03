@@ -20,6 +20,20 @@ spec:
       labels:
         app: workron-scheduler
     spec:
+      # Block startup until Postgres is reachable so NewPostgresStore /
+      # pgMigrate doesn't dial a not-yet-Ready DB and crash the pod.
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h workron-postgres -p 5432 -U workron; do
+                echo "waiting for postgres..."
+                sleep 2
+              done
       containers:
         - name: scheduler
           image: workron-scheduler:dev

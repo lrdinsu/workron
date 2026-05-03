@@ -18,6 +18,21 @@ spec:
       labels:
         app: workron-worker
     spec:
+      # Block startup until the scheduler is serving so RegisterWorker
+      # doesn't fire against a not-yet-Ready Service and exit the pod.
+      # /healthz returns 200 once the HTTP server is up.
+      initContainers:
+        - name: wait-for-scheduler
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              until wget -q -O - http://workron-scheduler:8080/healthz; do
+                echo "waiting for scheduler..."
+                sleep 2
+              done
       containers:
         - name: worker
           image: workron-worker:dev
