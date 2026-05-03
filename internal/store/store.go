@@ -28,8 +28,8 @@ type JobStore interface {
 // Action is "preempt" and PreemptionEpoch is the round epoch the worker
 // must echo back to /jobs/{id}/preempted when its process exits.
 type HeartbeatResult struct {
-	Action          string
-	PreemptionEpoch int
+	Action          string `json:"action"`
+	PreemptionEpoch int    `json:"preemption_epoch,omitempty"`
 }
 
 // JobStatus defines the valid states for a job
