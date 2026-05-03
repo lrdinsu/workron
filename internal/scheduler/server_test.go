@@ -889,7 +889,7 @@ type pingableStore struct {
 	err error
 }
 
-func (p *pingableStore) Ping(ctx context.Context) error { return p.err }
+func (p *pingableStore) Ping(_ context.Context) error { return p.err }
 
 func TestHandleHealthz_AlwaysOK(t *testing.T) {
 	srv := newTestServer()

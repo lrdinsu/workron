@@ -245,7 +245,7 @@ type fakeDemoSource struct {
 	savedEpoch      int
 }
 
-func (f *fakeDemoSource) ClaimJob(ctx context.Context) (*store.Job, bool) {
+func (f *fakeDemoSource) ClaimJob(_ context.Context) (*store.Job, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.job == nil {
@@ -256,9 +256,9 @@ func (f *fakeDemoSource) ClaimJob(ctx context.Context) (*store.Job, bool) {
 	return &out, true
 }
 
-func (f *fakeDemoSource) UpdateJobStatus(ctx context.Context, id string, status store.JobStatus) {}
+func (f *fakeDemoSource) UpdateJobStatus(_ context.Context, _ string, _ store.JobStatus) {}
 
-func (f *fakeDemoSource) SendHeartbeat(ctx context.Context, id string) (store.HeartbeatResult, error) {
+func (f *fakeDemoSource) SendHeartbeat(_ context.Context, _ string) (store.HeartbeatResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.heartbeatCalls++
@@ -268,7 +268,7 @@ func (f *fakeDemoSource) SendHeartbeat(ctx context.Context, id string) (store.He
 	return store.HeartbeatResult{}, nil
 }
 
-func (f *fakeDemoSource) ReportPreempted(ctx context.Context, id string, epoch int) error {
+func (f *fakeDemoSource) ReportPreempted(_ context.Context, _ string, epoch int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.preemptedReported = true
@@ -276,7 +276,7 @@ func (f *fakeDemoSource) ReportPreempted(ctx context.Context, id string, epoch i
 	return nil
 }
 
-func (f *fakeDemoSource) SaveCheckpoint(ctx context.Context, id string, epoch int, data []byte) error {
+func (f *fakeDemoSource) SaveCheckpoint(_ context.Context, _ string, epoch int, data []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.savedCheckpoint = append([]byte(nil), data...)
