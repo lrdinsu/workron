@@ -1,0 +1,67 @@
+# 3 worker replicas so the demo can show real in-cluster pods picking up
+# gang tasks and coordinating preemption. No probes: the worker process
+# does not run an HTTP server, only outbound polling to the scheduler.
+#The scheduler-side worker heartbeat is the source of truth for liveness.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workron-worker
+  labels:
+    app: workron-worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: workron-worker
+  template:
+    metadata:
+      labels:
+        app: workron-worker
+    spec:
+      # Block startup until the scheduler is serving so RegisterWorker
+      # doesn't fire against a not-yet-Ready Service and exit the pod.
+      # /healthz returns 200 once the HTTP server is up.
+      initContainers:
+        - name: wait-for-scheduler
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              until wget -q -O - http://workron-scheduler:8080/healthz; do
+                echo "waiting for scheduler..."
+                sleep 2
+              done
+      containers:
+        - name: worker
+          image: workron-worker:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: WORKRON_SCHEDULER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: workron-worker-config
+                  key: scheduler-url
+            - name: WORKRON_WORKERS
+              valueFrom:
+                configMapKeyRef:
+                  name: workron-worker-config
+                  key: workers
+            # Each pod uses its own pod name as the worker ID so logs and
+            # heartbeats can be correlated in `kubectl logs` directly.
+            - name: WORKRON_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          args:
+            - "--scheduler=$(WORKRON_SCHEDULER_URL)"
+            - "--workers=$(WORKRON_WORKERS)"
+            - "--worker-id=$(WORKRON_WORKER_ID)"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi

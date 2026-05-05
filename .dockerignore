@@ -1,0 +1,30 @@
+# Keep the build context small and reproducible. The builder only needs
+# Go sources and modules; everything else just slows down `docker build`.
+
+.git/
+.github/
+.notes/
+.idea/
+.vscode/
+
+# Local databases and dev state.
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+
+# Editor / OS noise.
+.DS_Store
+*.swp
+*.swo
+
+# Docs and policy files (keep README.md so it's available if anything
+# embeds it; everything else stays out).
+LICENSE
+*.md
+!README.md
+
+# Local env and compose tooling — never wanted inside the image.
+.env
+.env.*
+docker-compose*.yml

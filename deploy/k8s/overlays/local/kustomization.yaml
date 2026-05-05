@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Local kind overlay. Layers on the base by:
+#   - replacing Postgres credentials with a hardcoded dev value
+#   - promoting the scheduler Service to NodePort 30080 for host access
+#   - pinning images to :dev (loaded into kind via `kind load docker-image`)
+
+resources:
+  - ../../base
+
+images:
+  - name: workron-scheduler
+    newTag: dev
+  - name: workron-worker
+    newTag: dev
+
+patches:
+  - path: postgres-secret-patch.yaml
+    target:
+      kind: Secret
+      name: workron-postgres
+  - path: scheduler-service-patch.yaml
+    target:
+      kind: Service
+      name: workron-scheduler

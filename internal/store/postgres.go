@@ -44,6 +44,12 @@ func (s *PostgresStore) Close() {
 	s.pool.Close()
 }
 
+// Ping verifies the database is reachable by acquiring a connection from the
+// pool and issuing a lightweight round-trip. Ctx for cancellation and timeouts.
+func (s *PostgresStore) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
+}
+
 // WithReaperLock uses a PostgreSQL transaction-scoped advisory lock to ensure
 // only one scheduler instance runs the reaper at a time. The lock is held for
 // the duration of fn and automatically released when the transaction commits.

@@ -49,6 +49,7 @@ If you are curious about the design decisions and trade-offs behind this project
 - **Gang scheduling:** Submit N coordinated tasks that all reserve workers atomically before any start; background admission cycle places largest gangs first with capacity accounting across running and reserved jobs; gang env vars (`GANG_ID`, `GANG_SIZE`, `GANG_INDEX`, `GANG_PEERS`) injected at claim time
 - **Gang preemption:** When one gang task fails while siblings run, the scheduler drains the whole gang — running siblings receive a preempt action on their next heartbeat, send SIGTERM with a grace window, then SIGKILL if needed. The gang returns to `blocked` atomically and is re-admitted. A 45-second timeout force-drains workers that stop heartbeating mid-drain. The trigger task keeps its claim-time retry increment; innocent siblings are refunded so preemption does not consume their retry budget.
 - **Checkpoint and resume:** Workers can `POST /jobs/{id}/checkpoint` opaque bytes while preempting. The scheduler surfaces them as `CHECKPOINT_DATA` (base64) in the job's env on the next claim, so re-admitted tasks can resume from their last saved state instead of starting over.
+- **Kubernetes deployment:** Kustomize manifests for a local kind cluster (multi-replica scheduler with PostgreSQL advisory-lock coordination, worker `Deployment`, in-cluster Postgres `StatefulSet`, init containers for ordering, liveness/readiness probes, NodePort access). `make k8s-up` brings up the full stack; `make k8s-demo` runs the gang-preemption flow against real in-cluster pods. See [Running on Kubernetes](#running-on-kubernetes).
 
 **Planned — Scheduling Intelligence**
 - [ ] Priority-based preemption across gangs and single jobs
@@ -533,33 +534,129 @@ All three backends implement the same `JobStore` interface. The server, workers,
 
 ---
 
+## Running on Kubernetes
+
+Workron ships with a kustomize-managed Kubernetes deployment for [kind](https://kind.sigs.k8s.io/) that runs the full stack — multi-replica scheduler, worker pool, in-cluster Postgres — on a local single-node cluster. The same manifests are the starting point for cloud deployment; only the overlay changes.
+
+### Prerequisites
+
+- Docker (or any compatible engine — OrbStack, Colima, etc.)
+- `kind` (`brew install kind`)
+- `kubectl`, `jq`, and a POSIX-y `bash` for the demo script
+
+### Bring it up
+
+```bash
+make k8s-up        # creates the kind cluster, builds & loads images, applies manifests, waits for Ready
+```
+
+After ~2 minutes you should see:
+
+```bash
+kubectl get pods -n workron
+# NAME                                READY   STATUS    RESTARTS   AGE
+# workron-postgres-0                  1/1     Running   0          90s
+# workron-scheduler-xxxxxxxxxx-aaaaa  1/1     Running   0          90s
+# workron-scheduler-xxxxxxxxxx-bbbbb  1/1     Running   0          90s
+# workron-worker-yyyyyyyyyy-ccccc     1/1     Running   0          90s
+# workron-worker-yyyyyyyyyy-ddddd     1/1     Running   0          90s
+# workron-worker-yyyyyyyyyy-eeeee     1/1     Running   0          90s
+
+curl http://localhost:30080/healthz
+# 200 OK
+
+curl http://localhost:30080/health | jq
+# { "instance_id": "...", "uptime": "1m12s", "status": "ok" }
+```
+
+The scheduler's NodePort Service is mapped to host port `30080` via the kind config, so `localhost:30080` reaches the API directly.
+
+### Run the gang-preemption demo
+
+```bash
+make k8s-demo
+```
+
+This script (`scripts/k8s-demo.sh`) submits a 3-task gang of `demo:sleep 60` workloads, waits for in-cluster worker pods to claim them, fails one task to trigger gang preemption, watches the siblings drain through `preempting` → `preempted` while emitting synthetic checkpoints, then waits for re-admission. The "resume proof" stage greps the worker pod logs for the `"checkpoint_data_present":true` line that confirms the next claim received the previously-saved bytes via the `CHECKPOINT_DATA` env var.
+
+![Workron gang-preemption demo running in a kind cluster](docs/k8s-demo.gif)
+
+End-to-end runtime: ~50 seconds. The demo is driven by real worker Deployment pods polling the scheduler — `curl` is only used to submit the gang, trigger the failure, and observe state, never to claim jobs on the workers' behalf.
+
+### Recommended terminal layout for recording
+
+For a clean view of what the system is doing, split into four panes:
+
+```
+┌────────────────────────────┬────────────────────────────┐
+│ kubectl get pods -n workron│ make k8s-logs              │
+│   -w                       │   (both schedulers tail)   │
+├────────────────────────────┼────────────────────────────┤
+│ kubectl logs -l            │ make k8s-demo              │
+│   app=workron-worker -f    │                            │
+│   -c worker --prefix=true  │                            │
+└────────────────────────────┴────────────────────────────┘
+```
+
+The bottom-right pane drives, the other three observe.
+
+### What's actually running in-cluster
+
+- **Postgres**: a `StatefulSet` with a `PersistentVolumeClaim` for durable demo data. This is a local demo database, not production-grade. For a real deployment you would swap it for managed Postgres (RDS, Cloud SQL, or similar) and store the connection string in your platform's secret manager. The credentials in `deploy/k8s/overlays/local/` are deliberately hardcoded dev values; replace them via External Secrets Operator, sealed-secrets, or SOPS for any environment that isn't your laptop.
+- **Scheduler**: a 2-replica `Deployment` with `/healthz` liveness and `/readyz` readiness probes. The two replicas coordinate through `pg_try_advisory_xact_lock` — only one runs the reaper or admits a gang per tick, the other handles HTTP traffic. `kubectl logs -l app=workron-scheduler` shows both replicas interleaved; you can watch the lock holder change over time.
+- **Workers**: a 3-replica `Deployment`. Each worker uses its pod name as its registered worker ID (via `metadata.name` from the Downward API) so logs and the `/workers` endpoint correlate cleanly. The worker has no HTTP listener, so probes are intentionally absent — the scheduler's worker-heartbeat ledger is the source of truth for liveness, not Kubernetes pod state.
+- **Init containers**: scheduler pods block on `pg_isready`, worker pods block on the scheduler's `/healthz`. This is what eliminates the startup race that would otherwise cause `RESTARTS=3` while pods waited for their dependency to come up.
+
+### Tear it down
+
+```bash
+make k8s-down      # deletes the kind cluster, including the local PV
+```
+
+`kind delete cluster` removes everything, so don't store anything you care about in the demo Postgres. If you want to keep state across `make k8s-up` cycles, leave the cluster up between runs.
+
+### Cloud deployment
+
+The base manifests under `deploy/k8s/base/` are cloud-agnostic. The `deploy/k8s/overlays/local/` overlay carries everything that's specific to a kind environment: the NodePort Service, the dev Secret, image tags pinned to `:dev`. For EKS or GKE you would write a sibling overlay (`deploy/k8s/overlays/aws/` or similar) that:
+
+- Replaces the dev Secret with an External Secrets Operator `ExternalSecret` referencing AWS Secrets Manager / Google Secret Manager.
+- Removes the in-cluster Postgres `StatefulSet` and points the scheduler at a managed database (RDS/Cloud SQL).
+- Swaps the NodePort Service for a `LoadBalancer` (or keeps it ClusterIP behind an Ingress + cert-manager).
+- Pulls images from a real registry (ECR/GCR) instead of `kind load docker-image`.
+
+None of this requires changes to the Go code or the base manifests — it's pure overlay work, which is the whole reason the deployment is structured as base + overlay rather than a single rendered manifest. HPA on a custom queue-depth metric, Helm chart packaging, and Prometheus Operator integration are explicit non-goals for v1; each can land later as separate small PRs.
+
+---
+
 ## Project Structure
 
 ```
 workron/
 ├── cmd/
 │   ├── scheduler/
-│   │   └── main.go              # Scheduler entry point (standalone or distributed)
+│   │   ├── main.go              # Scheduler entry point (standalone or distributed)
+│   │   └── Dockerfile           # Multi-stage build, distroless runtime
 │   └── worker/
-│       └── main.go              # Standalone worker entry point
+│       ├── main.go              # Standalone worker entry point
+│       └── Dockerfile           # Multi-stage build, alpine runtime
 ├── internal/
 │   ├── metrics/
 │   │   ├── metrics.go           # Prometheus counters, histograms, registration
 │   │   ├── collector.go         # Custom gauge collector (queries store on scrape)
 │   │   └── metrics_test.go
 │   ├── store/
-│   │   ├── store.go             # JobStore, WorkerStore, GangStore interfaces, Job/Worker structs
+│   │   ├── store.go             # JobStore, WorkerStore, GangStore, Pinger interfaces, Job/Worker structs
 │   │   ├── memory.go            # In-memory store implementation
 │   │   ├── memory_test.go
-│   │   ├── sqlite.go            # SQLite store implementation
+│   │   ├── sqlite.go            # SQLite store implementation 
 │   │   ├── sqlite_test.go
-│   │   ├── postgres.go          # PostgreSQL store implementation (pgx/v5)
+│   │   ├── postgres.go          # PostgreSQL store implementation 
 │   │   ├── postgres_test.go     # PG tests (build tag: postgres)
 │   │   ├── store_test.go        # Shared compliance tests for all backends
 │   │   ├── dag.go               # Cycle detection + dependency validation
 │   │   └── dag_test.go
 │   ├── scheduler/
-│   │   ├── server.go            # HTTP handlers (jobs, gangs, workers, health)
+│   │   ├── server.go            # HTTP handlers (jobs, gangs, workers, health, healthz, readyz)
 │   │   ├── server_test.go
 │   │   ├── gang.go              # Gang admission cycle + placement logic
 │   │   ├── gang_test.go         # Unit tests for placement and capacity
@@ -567,15 +664,39 @@ workron/
 │   │   ├── reaper.go            # Background heartbeat timeout checker (gang-aware)
 │   │   └── reaper_test.go
 │   └── worker/
-│       ├── worker.go            # Poll and execute loop
+│       ├── worker.go            # Poll and execute loop, demo: prefix handling, checkpoint emission on preempt
 │       ├── worker_test.go
 │       ├── executor.go          # Runs shell commands via os/exec (context-cancelable, env injection)
 │       ├── executor_test.go
 │       ├── client.go            # HTTP client for talking to scheduler
 │       └── client_test.go
+├── deploy/
+│   ├── kind-config.yaml         # kind cluster definition (NodePort 30080 host mapping)
+│   └── k8s/
+│       ├── base/                # Cloud-agnostic Kustomize base
+│       │   ├── kustomization.yaml
+│       │   ├── namespace.yaml
+│       │   ├── postgres-secret.yaml
+│       │   ├── postgres-service.yaml      # Headless + ClusterIP
+│       │   ├── postgres-statefulset.yaml  # 1 replica, PVC, pg_isready probe
+│       │   ├── scheduler-configmap.yaml
+│       │   ├── scheduler-deployment.yaml  # 2 replicas, /healthz + /readyz, init container waits for Postgres
+│       │   ├── worker-configmap.yaml
+│       │   └── worker-deployment.yaml     # 3 replicas, init container waits for scheduler
+│       └── overlays/
+│           └── local/                     # kind-specific overlay
+│               ├── kustomization.yaml
+│               ├── postgres-secret-patch.yaml      # Dev password
+│               └── scheduler-service-patch.yaml   # NodePort 30080
+├── scripts/
+│   └── k8s-demo.sh              # Gang-preemption + checkpoint demo against the kind cluster
+├── docs/
+│   ├── k8s-demo.cast            # asciinema recording of the demo
+│   └── k8s-demo.gif             # Rendered GIF embedded in the README
 ├── docker-compose.yml           # Local PostgreSQL for development
 ├── .env.example                 # Environment variable template
-├── Makefile
+├── .dockerignore                # Build-context exclusions for the Dockerfiles
+├── Makefile                     # Includes k8s-up / k8s-down / k8s-demo / k8s-logs / k8s-build / k8s-load
 ├── .gitignore
 ├── go.mod
 ├── go.sum
@@ -588,7 +709,7 @@ workron/
 
 | Component | Choice |
 |-----------|--------|
-| Language | Go 1.22+ |
+| Language | Go 1.26 |
 | HTTP | `net/http` (stdlib only) |
 | Job execution | `os/exec` (stdlib) |
 | Logging | `log/slog` (stdlib, JSON output) |
@@ -598,6 +719,8 @@ workron/
 | PostgreSQL driver | `jackc/pgx/v5` (native pgxpool, no database/sql) |
 | ID generation | `google/uuid` (UUID v4) |
 | Local dev | Docker Compose (PostgreSQL 16) |
+| Container images | Multi-stage; distroless runtime (scheduler), alpine runtime (worker) |
+| Kubernetes | kind, kustomize (base + overlay), `pg_isready` / `/healthz` init containers, NodePort access |
 
 ---
 

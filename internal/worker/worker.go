@@ -2,7 +2,11 @@ package worker
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +15,14 @@ import (
 
 const pollInterval = 1 * time.Second
 const heartbeatInterval = 5 * time.Second
+
+// demoCommandPrefix marks a job's Command field as a demo workload. The
+// prefix is stripped before execution (so `demo:sleep 30` runs `sleep 30`),
+// and on preempt observation the worker emits a small synthetic checkpoint
+// payload before reporting /preempted. Lets the gang-preemption demo
+// exercise the checkpoint round-trip without needing a user command that
+// itself knows how to talk to the scheduler API.
+const demoCommandPrefix = "demo:"
 
 // JobSource is the minimal interface a Worker needs to fetch and report on jobs.
 // Both store.JobStore (in-process) and SchedulerClient (over HTTP) satisfy this.
@@ -26,6 +38,13 @@ type JobSource interface {
 // do not, because the in-process path does not use gang preemption signaling.
 type preemptReporter interface {
 	ReportPreempted(ctx context.Context, id string, epoch int) error
+}
+
+// checkpointSaver is an optional interface satisfied by JobSource implementations
+// that can upload a checkpoint payload to the scheduler. Used by the demo
+// workload path to emit synthetic checkpoint bytes on preempt.
+type checkpointSaver interface {
+	SaveCheckpoint(ctx context.Context, id string, epoch int, data []byte) error
 }
 
 // Worker polls a JobSource and executes jobs
@@ -93,7 +112,31 @@ func (w *Worker) Start(ctx context.Context) {
 // if a preempt was observed, the worker reports /preempted with the
 // epoch instead of /done or /fail.
 func (w *Worker) process(ctx context.Context, job *store.Job) {
-	w.logger.Info("job picked up", "job_id", job.ID, "attempt", job.Attempts, "max_retries", job.MaxRetries, "command", job.Command)
+	// A demo: prefix marks this job as exercising the synthetic checkpoint
+	// path. The prefix is stripped before exec so the underlying command is
+	// a normal shell invocation; only the post-preempt behavior changes.
+	command, isDemo := strings.CutPrefix(job.Command, demoCommandPrefix)
+	command = strings.TrimSpace(command)
+
+	// Surface whether the scheduler injected a previously-saved checkpoint
+	// on this claim. This is the visible proof that resume actually
+	// happened on a re-admitted gang task.
+	checkpointBytes := 0
+	if encoded, ok := job.Env["CHECKPOINT_DATA"]; ok && encoded != "" {
+		if decoded, err := base64.StdEncoding.DecodeString(encoded); err == nil {
+			checkpointBytes = len(decoded)
+		}
+	}
+
+	w.logger.Info("job picked up",
+		"job_id", job.ID,
+		"attempt", job.Attempts,
+		"max_retries", job.MaxRetries,
+		"command", job.Command,
+		"demo", isDemo,
+		"checkpoint_data_present", checkpointBytes > 0,
+		"checkpoint_data_bytes", checkpointBytes,
+	)
 
 	// preemptCh is closed once (guarded by sync.Once) when the heartbeat
 	// goroutine first observes action="preempt". The executor watches it
@@ -117,7 +160,8 @@ func (w *Worker) process(ctx context.Context, job *store.Job) {
 	defer hbCancel()
 	go w.sendHeartbeats(hbCtx, job.ID, recordPreempt)
 
-	err := w.executor.Execute(ctx, job.Command, job.Env, preemptCh)
+	startedAt := time.Now()
+	err := w.executor.Execute(ctx, command, job.Env, preemptCh)
 
 	// If the heartbeat loop ever flagged preemption, take the preempt
 	// reporting path instead of treating the executor's non-nil error
@@ -133,6 +177,21 @@ func (w *Worker) process(ctx context.Context, job *store.Job) {
 		preemptMu.Lock()
 		epoch := preemptEpoch
 		preemptMu.Unlock()
+
+		// Demo workloads upload a synthetic checkpoint before reporting
+		// drained, so the next claim sees CHECKPOINT_DATA. Real user jobs
+		// would post their own checkpoint between SIGTERM and exit.
+		if isDemo {
+			if cs, ok := w.source.(checkpointSaver); ok {
+				payload := buildDemoCheckpoint(job.ID, epoch, time.Since(startedAt))
+				if cerr := cs.SaveCheckpoint(ctx, job.ID, epoch, payload); cerr != nil {
+					w.logger.Warn("save demo checkpoint failed", "job_id", job.ID, "preemption_epoch", epoch, "error", cerr)
+				} else {
+					w.logger.Info("demo checkpoint saved", "job_id", job.ID, "preemption_epoch", epoch, "bytes", len(payload))
+				}
+			}
+		}
+
 		if rp, ok := w.source.(preemptReporter); ok {
 			if rerr := rp.ReportPreempted(ctx, job.ID, epoch); rerr != nil {
 				w.logger.Warn("report preempted failed", "job_id", job.ID, "preemption_epoch", epoch, "error", rerr)
@@ -186,4 +245,24 @@ func (w *Worker) sendHeartbeats(ctx context.Context, jobID string, onPreempt fun
 			}
 		}
 	}
+}
+
+// buildDemoCheckpoint produces a small JSON blob standing in for a real
+// workload's checkpoint state. The schema is to give the demo a
+// non-empty payload that survives the round-trip and shows up as
+// CHECKPOINT_DATA on the next claim.
+func buildDemoCheckpoint(taskID string, epoch int, elapsed time.Duration) []byte {
+	body, err := json.Marshal(map[string]any{
+		"task_id":    taskID,
+		"epoch":      epoch,
+		"elapsed_ms": elapsed.Milliseconds(),
+		"demo":       true,
+	})
+	if err != nil {
+		// json.Marshal of a map[string]any with these types cannot fail in
+		// practice, but fall back to a plain text marker so the demo path
+		// still has something to upload.
+		return fmt.Appendf(nil, "demo-checkpoint task=%s epoch=%d elapsed_ms=%d", taskID, epoch, elapsed.Milliseconds())
+	}
+	return body
 }

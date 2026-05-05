@@ -2,7 +2,9 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -222,5 +224,128 @@ func TestWorker_HeartbeatStopsAfterJobCompletes(t *testing.T) {
 	job, _ = s.GetJob(context.Background(), id)
 	if job.LastHeartbeat != nil && heartbeatAfterDone != nil && job.LastHeartbeat.After(*heartbeatAfterDone) {
 		t.Error("heartbeat continued after job completed, possible goroutine leak")
+	}
+}
+
+// fakeDemoSource implements the JobSource, preemptReporter, and
+// checkpointSaver interfaces just well enough to drive a single demo
+// job through preempt + checkpoint emission.
+type fakeDemoSource struct {
+	mu sync.Mutex
+
+	job *store.Job
+
+	heartbeatCalls    int
+	preemptAfterCalls int
+
+	preemptedReported bool
+	preemptedEpoch    int
+
+	savedCheckpoint []byte
+	savedEpoch      int
+}
+
+func (f *fakeDemoSource) ClaimJob(_ context.Context) (*store.Job, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.job == nil {
+		return nil, false
+	}
+	out := *f.job
+	f.job = nil
+	return &out, true
+}
+
+func (f *fakeDemoSource) UpdateJobStatus(_ context.Context, _ string, _ store.JobStatus) {}
+
+func (f *fakeDemoSource) SendHeartbeat(_ context.Context, _ string) (store.HeartbeatResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.heartbeatCalls++
+	if f.heartbeatCalls >= f.preemptAfterCalls {
+		return store.HeartbeatResult{Action: "preempt", PreemptionEpoch: 7}, nil
+	}
+	return store.HeartbeatResult{}, nil
+}
+
+func (f *fakeDemoSource) ReportPreempted(_ context.Context, _ string, epoch int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.preemptedReported = true
+	f.preemptedEpoch = epoch
+	return nil
+}
+
+func (f *fakeDemoSource) SaveCheckpoint(_ context.Context, _ string, epoch int, data []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.savedCheckpoint = append([]byte(nil), data...)
+	f.savedEpoch = epoch
+	return nil
+}
+
+func TestWorker_DemoJobEmitsCheckpointOnPreempt(t *testing.T) {
+	src := &fakeDemoSource{
+		job: &store.Job{
+			ID:      "job-demo-1",
+			Command: "demo:sleep 10",
+			Status:  store.StatusRunning,
+		},
+		preemptAfterCalls: 1,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	w := NewWorker(1, src, slog.Default())
+	w.process(ctx, &store.Job{
+		ID:      "job-demo-1",
+		Command: "demo:sleep 10",
+		Status:  store.StatusRunning,
+	})
+
+	src.mu.Lock()
+	defer src.mu.Unlock()
+
+	if !src.preemptedReported {
+		t.Fatal("expected ReportPreempted to be called")
+	}
+	if src.preemptedEpoch != 7 {
+		t.Errorf("preempted epoch = %d, want 7", src.preemptedEpoch)
+	}
+	if len(src.savedCheckpoint) == 0 {
+		t.Fatal("expected SaveCheckpoint to be called with non-empty payload")
+	}
+	if src.savedEpoch != 7 {
+		t.Errorf("checkpoint epoch = %d, want 7", src.savedEpoch)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(src.savedCheckpoint, &payload); err != nil {
+		t.Fatalf("checkpoint payload not valid JSON: %v", err)
+	}
+	if payload["task_id"] != "job-demo-1" {
+		t.Errorf("payload task_id = %v, want job-demo-1", payload["task_id"])
+	}
+	if payload["demo"] != true {
+		t.Errorf("payload demo = %v, want true", payload["demo"])
+	}
+}
+
+func TestBuildDemoCheckpoint_IsValidJSON(t *testing.T) {
+	out := buildDemoCheckpoint("job-x", 3, 1500*time.Millisecond)
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("not valid JSON: %v\npayload: %s", err, out)
+	}
+	if got["task_id"] != "job-x" {
+		t.Errorf("task_id = %v, want job-x", got["task_id"])
+	}
+	if got["epoch"] != float64(3) {
+		t.Errorf("epoch = %v, want 3", got["epoch"])
+	}
+	if got["elapsed_ms"] != float64(1500) {
+		t.Errorf("elapsed_ms = %v, want 1500", got["elapsed_ms"])
 	}
 }

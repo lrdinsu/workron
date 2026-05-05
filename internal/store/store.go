@@ -28,8 +28,8 @@ type JobStore interface {
 // Action is "preempt" and PreemptionEpoch is the round epoch the worker
 // must echo back to /jobs/{id}/preempted when its process exits.
 type HeartbeatResult struct {
-	Action          string
-	PreemptionEpoch int
+	Action          string `json:"action"`
+	PreemptionEpoch int    `json:"preemption_epoch,omitempty"`
 }
 
 // JobStatus defines the valid states for a job
@@ -131,6 +131,13 @@ type ReaperLocker interface {
 // MemoryStore and SQLiteStore run admission unconditionally.
 type GangAdmissionLocker interface {
 	WithGangAdmissionLock(ctx context.Context, fn func(ctx context.Context)) (acquired bool, err error)
+}
+
+// Pinger is an optional interface for verifying live connectivity to the
+// underlying storage backend. Discovered via type assertion. Stores that
+// don't implement it (MemoryStore) are treated as always reachable.
+type Pinger interface {
+	Ping(ctx context.Context) error
 }
 
 // WorkerStore defines operations for managing worker nodes.

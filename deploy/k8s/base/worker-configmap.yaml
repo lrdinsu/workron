@@ -1,0 +1,9 @@
+# Non-sensitive worker config. Workers reach the scheduler over the
+# in-cluster Service DNS name.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workron-worker-config
+data:
+  scheduler-url: http://workron-scheduler:8080
+  workers: "1"
