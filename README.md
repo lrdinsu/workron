@@ -25,7 +25,7 @@ If you are curious about the design decisions and trade-offs behind this project
 - 📝 [DAG Dependencies: Teaching a Job Scheduler to Wait](https://lrdinsu.github.io/posts/dag-dependencies-workron/)
 - 📝 [Making the Invisible Visible: Structured Logging, Metrics, and Request Tracing](https://lrdinsu.github.io/posts/observability-slog-prometheus-workron/)
 - 📝 [All or Nothing: Gang Scheduling in Workron](https://lrdinsu.github.io/posts/gang-scheduling-workron/)
-
+- 📝 [Draining the Gang: Coordinated Preemption with Checkpoint/Resume](https://lrdinsu.github.io/posts/gang-preemption-workron/)
 
 ---
 
