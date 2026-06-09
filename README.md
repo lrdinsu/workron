@@ -1,5 +1,11 @@
 # Workron
 
+[![CI](https://github.com/lrdinsu/workron/actions/workflows/ci.yml/badge.svg)](https://github.com/lrdinsu/workron/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/lrdinsu/workron.svg)](https://pkg.go.dev/github.com/lrdinsu/workron)
+[![Go Report Card](https://goreportcard.com/badge/github.com/lrdinsu/workron)](https://goreportcard.com/report/github.com/lrdinsu/workron)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/lrdinsu/workron)](https://github.com/lrdinsu/workron/blob/main/go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A distributed job scheduler written in Go, designed for ML and batch workloads.
 
 ---
@@ -26,6 +32,7 @@ If you are curious about the design decisions and trade-offs behind this project
 - 📝 [Making the Invisible Visible: Structured Logging, Metrics, and Request Tracing](https://lrdinsu.github.io/posts/observability-slog-prometheus-workron/)
 - 📝 [All or Nothing: Gang Scheduling in Workron](https://lrdinsu.github.io/posts/gang-scheduling-workron/)
 - 📝 [Draining the Gang: Coordinated Preemption with Checkpoint/Resume](https://lrdinsu.github.io/posts/gang-preemption-workron/)
+- 📝 [Putting Workron on Kubernetes: The Integration Bug Unit Tests Couldn't Reach](https://lrdinsu.github.io/posts/k8s-deployment-workron/)
 
 ---
 
